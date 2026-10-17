@@ -149,8 +149,11 @@ type Transaction interface {
 // Repository is the uniform data access interface implemented by all generated entity repositories.
 type Repository[T any] interface {
 	Insert(ctx context.Context, tr Transaction, entity T, opts ...WriteOption) error
+	InsertBatch(ctx context.Context, tr Transaction, entities []T, opts ...WriteOption) error
 	Upsert(ctx context.Context, tr Transaction, entity T, opts ...WriteOption) error
+	UpsertBatch(ctx context.Context, tr Transaction, entities []T, opts ...WriteOption) error
 	Delete(ctx context.Context, tr Transaction, key Key) error
+	DeleteBatch(ctx context.Context, tr Transaction, keys []Key) error
 	Mutate(ctx context.Context, tr Transaction, index IndexID, key Key, val int64) error
 
 	ReadRow(ctx context.Context, tr Transaction, key Key) (T, error)
@@ -167,6 +170,7 @@ type Repository[T any] interface {
 // QueueRepository is the uniform interface implemented by all generated FIFO queue repositories (is_queue = true).
 type QueueRepository[T any] interface {
 	Enqueue(ctx context.Context, tr Transaction, msg T, opts ...WriteOption) error
+	EnqueueBatch(ctx context.Context, tr Transaction, msgs []T, opts ...WriteOption) error
 	Dequeue(ctx context.Context, tr Transaction, partitionKey Key) (T, error)
 	DequeueBatch(ctx context.Context, tr Transaction, partitionKey Key, limit int) ([]T, error)
 }

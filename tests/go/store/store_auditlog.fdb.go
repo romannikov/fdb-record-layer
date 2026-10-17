@@ -45,9 +45,40 @@ func (r *auditlogRepository) Insert(ctx context.Context, tr fdblayer.Transaction
 	if entity == nil {
 		return fmt.Errorf("auditlog entity cannot be nil")
 	}
-	dir := r.dir
-
 	writeCfg := fdblayer.ApplyWriteOptions(opts)
+	return r.writeInserted(tr, entity, writeCfg)
+}
+
+// InsertBatch creates multiple AuditLog entities in the database, pipelining existence checks into a single round-trip.
+func (r *auditlogRepository) InsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*AuditLog, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(entities) == 0 {
+		return nil
+	}
+	writeCfg := fdblayer.ApplyWriteOptions(opts)
+	if len(entities) > 0xFFFF-int(writeCfg.UserVersion)+1 {
+		return fmt.Errorf("%w: batch size %d overflows uint16 UserVersion starting at %d", fdblayer.ErrInvalidKey, len(entities), writeCfg.UserVersion)
+	}
+	for i, entity := range entities {
+		if entity == nil {
+			return fmt.Errorf("auditlog entity at index %d cannot be nil", i)
+		}
+	}
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.writeInserted(tr, entity, fdblayer.WriteConfig{UserVersion: writeCfg.UserVersion + uint16(i)}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *auditlogRepository) writeInserted(tr fdblayer.Transaction, entity *AuditLog, writeCfg fdblayer.WriteConfig) error {
+	dir := r.dir
 	key, err := dir.PackWithVersionstamp(tuple.Tuple{AuditLogTypeID, fdblayer.DataNamespace, tuple.IncompleteVersionstamp(writeCfg.UserVersion)})
 	if err != nil {
 		return err
@@ -130,6 +161,97 @@ func (r *auditlogRepository) Upsert(ctx context.Context, tr fdblayer.Transaction
 		unmarshaled.LogId = entity.LogId
 		old = &unmarshaled
 	}
+	return r.applyUpsert(tr, key, entity, old)
+}
+
+// UpsertBatch inserts or updates multiple AuditLog entities in the database, pipelining existing-record reads into a single round-trip.
+func (r *auditlogRepository) UpsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*AuditLog, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(entities) == 0 {
+		return nil
+	}
+	writeCfg := fdblayer.ApplyWriteOptions(opts)
+	userVersions := make([]uint16, len(entities))
+	var vsCount int
+	dir := r.dir
+	keys := make([]fdb.Key, len(entities))
+	futures := make([]fdb.FutureByteSlice, len(entities))
+	seenKeys := make(map[string]struct{}, len(entities))
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entity == nil {
+			return fmt.Errorf("auditlog entity at index %d cannot be nil", i)
+		}
+		if len(entity.LogId) != 0 && len(entity.LogId) != 12 {
+			return fmt.Errorf("%w: invalid versionstamp length %d for LogId at index %d: must be 0 or 12 bytes", fdblayer.ErrInvalidKey, len(entity.LogId), i)
+		}
+		if len(entity.LogId) == 0 {
+			if vsCount > 0xFFFF-int(writeCfg.UserVersion) {
+				return fmt.Errorf("%w: batch versionstamp count overflows uint16 UserVersion starting at %d", fdblayer.ErrInvalidKey, writeCfg.UserVersion)
+			}
+			userVersions[i] = writeCfg.UserVersion + uint16(vsCount)
+			vsCount++
+			continue
+		}
+		if _, err := fdblayer.PackVersionstampElement(entity.LogId); err != nil {
+			return fmt.Errorf("at index %d: %w", i, err)
+		}
+		key := dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.DataNamespace, fdblayer.BytesToVersionstamp(entity.LogId)})
+		keys[i] = key
+		if _, seen := seenKeys[string(key)]; !seen {
+			seenKeys[string(key)] = struct{}{}
+			futures[i] = tr.Get(key)
+		}
+	}
+	batchOld := make(map[string]*AuditLog, len(seenKeys))
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(entity.LogId) == 0 {
+			continue
+		}
+		keyStr := string(keys[i])
+		if _, seen := batchOld[keyStr]; !seen {
+			var old *AuditLog
+			if oldValue := futures[i].MustGet(); oldValue != nil {
+				var unmarshaled AuditLog
+				if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {
+					return fmt.Errorf("failed to unmarshal existing auditlog at index %d: %w", i, err)
+				}
+				unmarshaled.LogId = entity.LogId
+				old = &unmarshaled
+			}
+			batchOld[keyStr] = old
+		}
+	}
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(entity.LogId) == 0 {
+			if err := r.writeInserted(tr, entity, fdblayer.WriteConfig{UserVersion: userVersions[i]}); err != nil {
+				return err
+			}
+			continue
+		}
+		key := keys[i]
+		keyStr := string(key)
+		old := batchOld[keyStr]
+		if err := r.applyUpsert(tr, key, entity, old); err != nil {
+			return err
+		}
+		batchOld[keyStr] = proto.Clone(entity).(*AuditLog)
+	}
+	return nil
+}
+
+func (r *auditlogRepository) applyUpsert(tr fdblayer.Transaction, key fdb.Key, entity *AuditLog, old *AuditLog) error {
+	dir := r.dir
 
 	// Marshal without mutating the caller's struct in-place.
 	marshalTarget := entity
@@ -209,12 +331,72 @@ func (r *auditlogRepository) Delete(ctx context.Context, tr fdblayer.Transaction
 	if err != nil {
 		return err
 	}
-	value := tr.Get(dataKey).MustGet()
-	if value != nil {
-		entity := &AuditLog{}
-		if err := proto.Unmarshal(value, entity); err != nil {
+	var entity *AuditLog
+	if value := tr.Get(dataKey).MustGet(); value != nil {
+		var unmarshaled AuditLog
+		if err := proto.Unmarshal(value, &unmarshaled); err != nil {
 			return fmt.Errorf("failed to unmarshal existing auditlog: %w", err)
 		}
+		entity = &unmarshaled
+	}
+	r.applyDelete(tr, pkTuple, dataKey, entity)
+	return nil
+}
+
+// DeleteBatch removes multiple AuditLog entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.
+func (r *auditlogRepository) DeleteBatch(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	dir := r.dir
+	pkTuples := make([]tuple.Tuple, 0, len(keys))
+	dataKeys := make([]fdb.Key, 0, len(keys))
+	futures := make([]fdb.FutureByteSlice, 0, len(keys))
+	seenKeys := make(map[string]struct{}, len(keys))
+	for i, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, AuditLogTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindVersionstamp})
+		if err != nil {
+			return fmt.Errorf("at index %d: %w", i, err)
+		}
+		if _, seen := seenKeys[string(dataKey)]; seen {
+			continue
+		}
+		seenKeys[string(dataKey)] = struct{}{}
+		pkTuples = append(pkTuples, pkTuple)
+		dataKeys = append(dataKeys, dataKey)
+		futures = append(futures, tr.Get(dataKey))
+	}
+	entities := make([]*AuditLog, len(dataKeys))
+	for i := range dataKeys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if value := futures[i].MustGet(); value != nil {
+			var unmarshaled AuditLog
+			if err := proto.Unmarshal(value, &unmarshaled); err != nil {
+				return fmt.Errorf("failed to unmarshal existing auditlog: %w", err)
+			}
+			entities[i] = &unmarshaled
+		}
+	}
+	for i, dataKey := range dataKeys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		r.applyDelete(tr, pkTuples[i], dataKey, entities[i])
+	}
+	return nil
+}
+
+func (r *auditlogRepository) applyDelete(tr fdblayer.Transaction, pkTuple tuple.Tuple, dataKey fdb.Key, entity *AuditLog) {
+	dir := r.dir
+	if entity != nil {
 		// Standard index
 		tr.Clear(dir.Pack(tuple.Tuple{AuditLogTypeID, fdblayer.IndexNamespace, int64(AuditLogByActor), entity.Actor, pkTuple[0]}))
 		// Fan-out index
@@ -233,8 +415,6 @@ func (r *auditlogRepository) Delete(ctx context.Context, tr fdblayer.Transaction
 		}
 	}
 	tr.Clear(dataKey)
-
-	return nil
 }
 
 // Mutate applies an atomic mutation (ADD, COUNT, MIN, MAX) to a mutation secondary index of AuditLog.

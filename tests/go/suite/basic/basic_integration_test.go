@@ -830,3 +830,67 @@ func TestIntegration_MutationSecondaryIndexes_Post(t *testing.T) {
 		return nil
 	})
 }
+
+func TestIntegration_BatchWrites_Product(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	repo := store.NewProductRepository(dir)
+
+	// 1. InsertBatch
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return repo.InsertBatch(ctx, tr, []*store.Product{
+			{Id: "p1", Name: "Book 1", Category: "books", Price: 20},
+			{Id: "p2", Name: "Book 2", Category: "books", Price: 30},
+		})
+	})
+
+	// 2. UpsertBatch with intra-batch duplicate key ("p1" updated twice) and new key ("p3" updated twice)
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return repo.UpsertBatch(ctx, tr, []*store.Product{
+			{Id: "p1", Name: "Book 1 v2", Category: "books", Price: 25},
+			{Id: "p1", Name: "Game 1", Category: "games", Price: 40},
+			{Id: "p3", Name: "Game 3 v1", Category: "games", Price: 60},
+			{Id: "p3", Name: "Game 3 v2", Category: "games", Price: 50},
+		})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if got, err := repo.ReadAggregate(ctx, tr, store.ProductCount, fdblayer.Key{}); err != nil || got != 3 {
+			t.Fatalf("expected total ProductCount=3, got %d, err=%v", got, err)
+		}
+		if got, err := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"books"}); err != nil || got != 1 {
+			t.Fatalf("expected books COUNT=1, got %d, err=%v", got, err)
+		}
+		if got, err := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"books"}); err != nil || got != 30 {
+			t.Fatalf("expected books SUM=30, got %d, err=%v", got, err)
+		}
+		if got, err := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"games"}); err != nil || got != 2 {
+			t.Fatalf("expected games COUNT=2, got %d, err=%v", got, err)
+		}
+		if got, err := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"games"}); err != nil || got != 90 {
+			t.Fatalf("expected games SUM=90, got %d, err=%v", got, err)
+		}
+		return nil
+	})
+
+	// 3. DeleteBatch with duplicate keys
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return repo.DeleteBatch(ctx, tr, []fdblayer.Key{{"p1"}, {"p1"}, {"ghost"}})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		if got, err := repo.ReadAggregate(ctx, tr, store.ProductCount, fdblayer.Key{}); err != nil || got != 2 {
+			t.Fatalf("expected total ProductCount=2 after DeleteBatch, got %d, err=%v", got, err)
+		}
+		if got, err := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"games"}); err != nil || got != 1 {
+			t.Fatalf("expected games COUNT=1 after DeleteBatch, got %d, err=%v", got, err)
+		}
+		if got, err := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"games"}); err != nil || got != 50 {
+			t.Fatalf("expected games SUM=50 after DeleteBatch, got %d, err=%v", got, err)
+		}
+		return nil
+	})
+}

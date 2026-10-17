@@ -64,6 +64,31 @@ func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transac
 	return nil
 }
 
+// EnqueueBatch adds multiple TaskMessage items to the queue.
+func (r *taskmessageRepository) EnqueueBatch(ctx context.Context, tr fdblayer.Transaction, entities []*TaskMessage, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(entities) == 0 {
+		return nil
+	}
+	writeCfg := fdblayer.ApplyWriteOptions(opts)
+	if len(entities) > 0xFFFF-int(writeCfg.UserVersion)+1 {
+		return fmt.Errorf("%w: batch size %d overflows uint16 UserVersion starting at %d", fdblayer.ErrInvalidKey, len(entities), writeCfg.UserVersion)
+	}
+	for i, entity := range entities {
+		if entity == nil {
+			return fmt.Errorf("taskmessage entity at index %d cannot be nil", i)
+		}
+	}
+	for i, entity := range entities {
+		if err := r.Enqueue(ctx, tr, entity, fdblayer.WithUserVersion(writeCfg.UserVersion+uint16(i))); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // Dequeue reads and removes the single oldest message from the queue.
 func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transaction, partitionKey fdblayer.Key) (*TaskMessage, error) {
 	if err := ctx.Err(); err != nil {

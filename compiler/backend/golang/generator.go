@@ -136,6 +136,7 @@ func generateQueueRepository(g Printer, msg ir.MessageSpec) {
 	g.P()
 
 	generateEnqueue(g, msg)
+	generateEnqueueBatch(g, msg)
 	generateDequeue(g, msg)
 	generateDequeueBatch(g, msg)
 }
@@ -172,6 +173,47 @@ func generateEnqueue(g Printer, msg ir.MessageSpec) {
 		g.P("	tr.Set(key, value)")
 	}
 	g.P()
+	g.P("	return nil")
+	g.P("}")
+	g.P()
+}
+
+func generateEnqueueBatch(g Printer, msg ir.MessageSpec) {
+	lowerName := strings.ToLower(msg.Name)
+	hasVS := ir.MsgHasVersionstampPK(msg)
+
+	g.P("// EnqueueBatch adds multiple ", msg.Name, " items to the queue.")
+	g.P("func (r *", lowerName, "Repository) EnqueueBatch(ctx context.Context, tr fdblayer.Transaction, entities []*", msg.Name, ", opts ...fdblayer.WriteOption) error {")
+	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("		return err")
+	g.P("	}")
+	g.P("	if len(entities) == 0 {")
+	g.P("		return nil")
+	g.P("	}")
+	if hasVS {
+		g.P("	writeCfg := fdblayer.ApplyWriteOptions(opts)")
+		g.P("	if len(entities) > 0xFFFF-int(writeCfg.UserVersion)+1 {")
+		g.P(`		return fmt.Errorf("%w: batch size %d overflows uint16 UserVersion starting at %d", fdblayer.ErrInvalidKey, len(entities), writeCfg.UserVersion)`)
+		g.P("	}")
+	}
+	g.P("	for i, entity := range entities {")
+	g.P("		if entity == nil {")
+	g.P(`			return fmt.Errorf("`, lowerName, ` entity at index %d cannot be nil", i)`)
+	g.P("		}")
+	g.P("	}")
+	if hasVS {
+		g.P("	for i, entity := range entities {")
+		g.P("		if err := r.Enqueue(ctx, tr, entity, fdblayer.WithUserVersion(writeCfg.UserVersion+uint16(i))); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("	}")
+	} else {
+		g.P("	for _, entity := range entities {")
+		g.P("		if err := r.Enqueue(ctx, tr, entity, opts...); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("	}")
+	}
 	g.P("	return nil")
 	g.P("}")
 	g.P()
@@ -347,6 +389,15 @@ func generateTypesAndInterface(g Printer, msg ir.MessageSpec) {
 	g.P()
 }
 
+func msgHasNonMutationIndex(msg ir.MessageSpec) bool {
+	for _, idx := range msg.SecondaryIndexes {
+		if !idx.IsMutation() {
+			return true
+		}
+	}
+	return false
+}
+
 func generateInsert(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	hasVS := ir.MsgHasVersionstampPK(msg)
@@ -360,19 +411,114 @@ func generateInsert(g Printer, msg ir.MessageSpec) {
 	g.P("	if entity == nil {")
 	g.P(`		return fmt.Errorf("`, lowerName, ` entity cannot be nil")`)
 	g.P("	}")
-	g.P("	dir := r.dir")
-	g.P()
 	if hasVS {
 		g.P("	writeCfg := fdblayer.ApplyWriteOptions(opts)")
+		g.P("	return r.writeInserted(tr, entity, writeCfg)")
+	} else {
+		g.P("	key := r.dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.DataNamespace, ", pkTupleArgsFromEntity(msg, "entity"), "})")
+		g.P("	if existing := tr.Get(key).MustGet(); existing != nil {")
+		g.P(`		return fmt.Errorf("`, lowerName, ` %w", fdblayer.ErrAlreadyExists)`)
+		g.P("	}")
+		g.P("	return r.writeInserted(tr, key, entity)")
+	}
+	g.P("}")
+	g.P()
+
+	generateInsertBatch(g, msg)
+	generateWriteInserted(g, msg)
+}
+
+func generateInsertBatch(g Printer, msg ir.MessageSpec) {
+	lowerName := strings.ToLower(msg.Name)
+	hasVS := ir.MsgHasVersionstampPK(msg)
+	typeIDConst := typeIDConstName(msg)
+
+	g.P("// InsertBatch creates multiple ", msg.Name, " entities in the database, pipelining existence checks into a single round-trip.")
+	g.P("func (r *", lowerName, "Repository) InsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*", msg.Name, ", opts ...fdblayer.WriteOption) error {")
+	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("		return err")
+	g.P("	}")
+	g.P("	if len(entities) == 0 {")
+	g.P("		return nil")
+	g.P("	}")
+	if hasVS {
+		g.P("	writeCfg := fdblayer.ApplyWriteOptions(opts)")
+		g.P("	if len(entities) > 0xFFFF-int(writeCfg.UserVersion)+1 {")
+		g.P(`		return fmt.Errorf("%w: batch size %d overflows uint16 UserVersion starting at %d", fdblayer.ErrInvalidKey, len(entities), writeCfg.UserVersion)`)
+		g.P("	}")
+		g.P("	for i, entity := range entities {")
+		g.P("		if entity == nil {")
+		g.P(`			return fmt.Errorf("`, lowerName, ` entity at index %d cannot be nil", i)`)
+		g.P("		}")
+		g.P("	}")
+		g.P("	for i, entity := range entities {")
+		g.P("		if err := ctx.Err(); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("		if err := r.writeInserted(tr, entity, fdblayer.WriteConfig{UserVersion: writeCfg.UserVersion + uint16(i)}); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("	}")
+	} else {
+		g.P("	dir := r.dir")
+		g.P("	keys := make([]fdb.Key, len(entities))")
+		g.P("	futures := make([]fdb.FutureByteSlice, len(entities))")
+		g.P("	seenKeys := make(map[string]struct{}, len(entities))")
+		g.P("	for i, entity := range entities {")
+		g.P("		if err := ctx.Err(); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("		if entity == nil {")
+		g.P(`			return fmt.Errorf("`, lowerName, ` entity at index %d cannot be nil", i)`)
+		g.P("		}")
+		g.P("		key := dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.DataNamespace, ", pkTupleArgsFromEntity(msg, "entity"), "})")
+		g.P("		if _, dup := seenKeys[string(key)]; dup {")
+		g.P(`			return fmt.Errorf("`, lowerName, ` at index %d: %w", i, fdblayer.ErrAlreadyExists)`)
+		g.P("		}")
+		g.P("		seenKeys[string(key)] = struct{}{}")
+		g.P("		keys[i] = key")
+		g.P("		futures[i] = tr.Get(key)")
+		g.P("	}")
+		g.P("	for i, future := range futures {")
+		g.P("		if err := ctx.Err(); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("		if existing := future.MustGet(); existing != nil {")
+		g.P(`			return fmt.Errorf("`, lowerName, ` at index %d: %w", i, fdblayer.ErrAlreadyExists)`)
+		g.P("		}")
+		g.P("	}")
+		g.P("	for i, entity := range entities {")
+		g.P("		if err := ctx.Err(); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("		if err := r.writeInserted(tr, keys[i], entity); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("	}")
+	}
+	g.P("	return nil")
+	g.P("}")
+	g.P()
+}
+
+func generateWriteInserted(g Printer, msg ir.MessageSpec) {
+	lowerName := strings.ToLower(msg.Name)
+	hasVS := ir.MsgHasVersionstampPK(msg)
+	hasIdx := msgHasNonMutationIndex(msg)
+	typeIDConst := typeIDConstName(msg)
+
+	if hasVS {
+		g.P("func (r *", lowerName, "Repository) writeInserted(tr fdblayer.Transaction, entity *", msg.Name, ", writeCfg fdblayer.WriteConfig) error {")
+		g.P("	dir := r.dir")
 		g.P("	key, err := dir.PackWithVersionstamp(tuple.Tuple{", typeIDConst, ", fdblayer.DataNamespace, ", versionstampedPKTupleArgsWithVar(msg, "writeCfg.UserVersion"), "})")
 		g.P("	if err != nil {")
 		g.P("		return err")
 		g.P("	}")
 	} else {
-		g.P("	key := dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.DataNamespace, ", pkTupleArgsFromEntity(msg, "entity"), "})")
-		g.P("	if existing := tr.Get(key).MustGet(); existing != nil {")
-		g.P(`		return fmt.Errorf("`, lowerName, ` %w", fdblayer.ErrAlreadyExists)`)
-		g.P("	}")
+		g.P("func (r *", lowerName, "Repository) writeInserted(tr fdblayer.Transaction, key fdb.Key, entity *", msg.Name, ") error {")
+		if hasIdx {
+			g.P("	dir := r.dir")
+		}
 	}
 	g.P()
 
@@ -440,13 +586,7 @@ func generateInsert(g Printer, msg ir.MessageSpec) {
 func generateUpsert(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	hasVS := ir.MsgHasVersionstampPK(msg)
-	hasIdx := false
-	for _, idx := range msg.SecondaryIndexes {
-		if !idx.IsMutation() {
-			hasIdx = true
-			break
-		}
-	}
+	hasIdx := msgHasNonMutationIndex(msg)
 	pkArgsEntity := pkTupleArgsFromEntity(msg, "entity")
 	typeIDConst := typeIDConstName(msg)
 	vsFieldName := versionstampFieldName(msg)
@@ -492,6 +632,145 @@ func generateUpsert(g Printer, msg ir.MessageSpec) {
 		}
 		g.P("		old = &unmarshaled")
 		g.P("	}")
+		g.P("	return r.applyUpsert(tr, key, entity, old)")
+	} else {
+		g.P("	return r.applyUpsert(tr, key, entity)")
+	}
+	g.P("}")
+	g.P()
+
+	generateUpsertBatch(g, msg)
+	generateApplyUpsert(g, msg)
+}
+
+func generateUpsertBatch(g Printer, msg ir.MessageSpec) {
+	lowerName := strings.ToLower(msg.Name)
+	hasVS := ir.MsgHasVersionstampPK(msg)
+	hasIdx := msgHasNonMutationIndex(msg)
+	pkArgsEntity := pkTupleArgsFromEntity(msg, "entity")
+	typeIDConst := typeIDConstName(msg)
+	vsFieldName := versionstampFieldName(msg)
+
+	g.P("// UpsertBatch inserts or updates multiple ", msg.Name, " entities in the database, pipelining existing-record reads into a single round-trip.")
+	g.P("func (r *", lowerName, "Repository) UpsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*", msg.Name, ", opts ...fdblayer.WriteOption) error {")
+	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("		return err")
+	g.P("	}")
+	g.P("	if len(entities) == 0 {")
+	g.P("		return nil")
+	g.P("	}")
+	if hasVS {
+		g.P("	writeCfg := fdblayer.ApplyWriteOptions(opts)")
+		g.P("	userVersions := make([]uint16, len(entities))")
+		g.P("	var vsCount int")
+	}
+	g.P("	dir := r.dir")
+	g.P("	keys := make([]fdb.Key, len(entities))")
+	if hasIdx {
+		g.P("	futures := make([]fdb.FutureByteSlice, len(entities))")
+		g.P("	seenKeys := make(map[string]struct{}, len(entities))")
+	}
+	g.P("	for i, entity := range entities {")
+	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("			return err")
+	g.P("		}")
+	g.P("		if entity == nil {")
+	g.P(`			return fmt.Errorf("`, lowerName, ` entity at index %d cannot be nil", i)`)
+	g.P("		}")
+	if hasVS {
+		g.P("		if len(entity.", vsFieldName, ") != 0 && len(entity.", vsFieldName, ") != 12 {")
+		g.P(`			return fmt.Errorf("%w: invalid versionstamp length %d for `, vsFieldName, ` at index %d: must be 0 or 12 bytes", fdblayer.ErrInvalidKey, len(entity.`, vsFieldName, `), i)`)
+		g.P("		}")
+		g.P("		if len(entity.", vsFieldName, ") == 0 {")
+		g.P("			if vsCount > 0xFFFF-int(writeCfg.UserVersion) {")
+		g.P(`				return fmt.Errorf("%w: batch versionstamp count overflows uint16 UserVersion starting at %d", fdblayer.ErrInvalidKey, writeCfg.UserVersion)`)
+		g.P("			}")
+		g.P("			userVersions[i] = writeCfg.UserVersion + uint16(vsCount)")
+		g.P("			vsCount++")
+		g.P("			continue")
+		g.P("		}")
+		g.P("		if _, err := fdblayer.PackVersionstampElement(entity.", vsFieldName, "); err != nil {")
+		g.P(`			return fmt.Errorf("at index %d: %w", i, err)`)
+		g.P("		}")
+	}
+	g.P("		key := dir.Pack(tuple.Tuple{", typeIDConst, ", fdblayer.DataNamespace, ", pkArgsEntity, "})")
+	g.P("		keys[i] = key")
+	if hasIdx {
+		g.P("		if _, seen := seenKeys[string(key)]; !seen {")
+		g.P("			seenKeys[string(key)] = struct{}{}")
+		g.P("			futures[i] = tr.Get(key)")
+		g.P("		}")
+	}
+	g.P("	}")
+	if hasIdx {
+		g.P("	batchOld := make(map[string]*", msg.Name, ", len(seenKeys))")
+		g.P("	for i, entity := range entities {")
+		g.P("		if err := ctx.Err(); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		if hasVS {
+			g.P("		if len(entity.", vsFieldName, ") == 0 {")
+			g.P("			continue")
+			g.P("		}")
+		}
+		g.P("		keyStr := string(keys[i])")
+		g.P("		if _, seen := batchOld[keyStr]; !seen {")
+		g.P("			var old *", msg.Name)
+		g.P("			if oldValue := futures[i].MustGet(); oldValue != nil {")
+		g.P("				var unmarshaled ", msg.Name)
+		g.P("				if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {")
+		g.P(`					return fmt.Errorf("failed to unmarshal existing `, lowerName, ` at index %d: %w", i, err)`)
+		g.P("				}")
+		for _, f := range msg.PrimaryKeyFields {
+			g.P("				unmarshaled.", f.GoName, " = entity.", f.GoName)
+		}
+		g.P("				old = &unmarshaled")
+		g.P("			}")
+		g.P("			batchOld[keyStr] = old")
+		g.P("		}")
+		g.P("	}")
+	}
+	g.P("	for i, entity := range entities {")
+	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("			return err")
+	g.P("		}")
+	if hasVS {
+		g.P("		if len(entity.", vsFieldName, ") == 0 {")
+		g.P("			if err := r.writeInserted(tr, entity, fdblayer.WriteConfig{UserVersion: userVersions[i]}); err != nil {")
+		g.P("				return err")
+		g.P("			}")
+		g.P("			continue")
+		g.P("		}")
+	}
+	if hasIdx {
+		g.P("		key := keys[i]")
+		g.P("		keyStr := string(key)")
+		g.P("		old := batchOld[keyStr]")
+		g.P("		if err := r.applyUpsert(tr, key, entity, old); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("		batchOld[keyStr] = proto.Clone(entity).(*", msg.Name, ")")
+	} else {
+		g.P("		if err := r.applyUpsert(tr, keys[i], entity); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+	}
+	g.P("	}")
+	g.P("	return nil")
+	g.P("}")
+	g.P()
+}
+
+func generateApplyUpsert(g Printer, msg ir.MessageSpec) {
+	lowerName := strings.ToLower(msg.Name)
+	hasIdx := msgHasNonMutationIndex(msg)
+	typeIDConst := typeIDConstName(msg)
+
+	if hasIdx {
+		g.P("func (r *", lowerName, "Repository) applyUpsert(tr fdblayer.Transaction, key fdb.Key, entity *", msg.Name, ", old *", msg.Name, ") error {")
+		g.P("	dir := r.dir")
+	} else {
+		g.P("func (r *", lowerName, "Repository) applyUpsert(tr fdblayer.Transaction, key fdb.Key, entity *", msg.Name, ") error {")
 	}
 	g.P()
 
@@ -643,11 +922,7 @@ func isPrimaryKeyMutationIndex(msg ir.MessageSpec, idx ir.SecondaryIndexSpec) bo
 	return true
 }
 
-func generateDelete(g Printer, msg ir.MessageSpec) {
-	lowerName := strings.ToLower(msg.Name)
-	typeIDConst := typeIDConstName(msg)
-	hasDeleteIdx := false
-	needsPKTuple := false
+func deleteIndexFlags(msg ir.MessageSpec) (hasDeleteIdx bool, needsPKTuple bool) {
 	for _, idx := range msg.SecondaryIndexes {
 		if idx.IsMutation() {
 			if isPrimaryKeyMutationIndex(msg, idx) {
@@ -669,6 +944,13 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 			}
 		}
 	}
+	return hasDeleteIdx, needsPKTuple
+}
+
+func generateDelete(g Printer, msg ir.MessageSpec) {
+	lowerName := strings.ToLower(msg.Name)
+	typeIDConst := typeIDConstName(msg)
+	hasDeleteIdx, needsPKTuple := deleteIndexFlags(msg)
 	pkSchema := schemaSliceExpr(msg.PrimaryKeyFields)
 	pkTupleVar := "_"
 	if needsPKTuple {
@@ -687,12 +969,142 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 	g.P("		return err")
 	g.P("	}")
 	if hasDeleteIdx {
-		g.P("	value := tr.Get(dataKey).MustGet()")
-		g.P("	if value != nil {")
-		g.P("		entity := &", msg.Name, "{}")
-		g.P("		if err := proto.Unmarshal(value, entity); err != nil {")
+		g.P("	var entity *", msg.Name)
+		g.P("	if value := tr.Get(dataKey).MustGet(); value != nil {")
+		g.P("		var unmarshaled ", msg.Name)
+		g.P("		if err := proto.Unmarshal(value, &unmarshaled); err != nil {")
 		g.P(`			return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
 		g.P("		}")
+		g.P("		entity = &unmarshaled")
+		g.P("	}")
+		if needsPKTuple {
+			g.P("	r.applyDelete(tr, pkTuple, dataKey, entity)")
+		} else {
+			g.P("	r.applyDelete(tr, dataKey, entity)")
+		}
+		g.P("	return nil")
+	} else if needsPKTuple {
+		g.P("	r.applyDelete(tr, pkTuple, dataKey)")
+		g.P("	return nil")
+	} else {
+		g.P("	tr.Clear(dataKey)")
+		g.P("	return nil")
+	}
+	g.P("}")
+	g.P()
+
+	generateDeleteBatch(g, msg, hasDeleteIdx, needsPKTuple)
+	if hasDeleteIdx || needsPKTuple {
+		generateApplyDelete(g, msg, hasDeleteIdx, needsPKTuple)
+	}
+}
+
+func generateDeleteBatch(g Printer, msg ir.MessageSpec, hasDeleteIdx, needsPKTuple bool) {
+	lowerName := strings.ToLower(msg.Name)
+	typeIDConst := typeIDConstName(msg)
+	pkSchema := schemaSliceExpr(msg.PrimaryKeyFields)
+	pkTupleVar := "_"
+	if needsPKTuple {
+		pkTupleVar = "pkTuple"
+	}
+
+	g.P("// DeleteBatch removes multiple ", msg.Name, " entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.")
+	g.P("func (r *", lowerName, "Repository) DeleteBatch(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {")
+	g.P("	if err := ctx.Err(); err != nil {")
+	g.P("		return err")
+	g.P("	}")
+	g.P("	if len(keys) == 0 {")
+	g.P("		return nil")
+	g.P("	}")
+	g.P("	dir := r.dir")
+	if needsPKTuple {
+		g.P("	pkTuples := make([]tuple.Tuple, 0, len(keys))")
+	}
+	g.P("	dataKeys := make([]fdb.Key, 0, len(keys))")
+	if hasDeleteIdx {
+		g.P("	futures := make([]fdb.FutureByteSlice, 0, len(keys))")
+	}
+	g.P("	seenKeys := make(map[string]struct{}, len(keys))")
+	g.P("	for i, key := range keys {")
+	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("			return err")
+	g.P("		}")
+	g.P("		", pkTupleVar, ", dataKey, err := fdblayer.PackPrimaryKey(dir, ", typeIDConst, ", key, ", pkSchema, ")")
+	g.P("		if err != nil {")
+	g.P(`			return fmt.Errorf("at index %d: %w", i, err)`)
+	g.P("		}")
+	g.P("		if _, seen := seenKeys[string(dataKey)]; seen {")
+	g.P("			continue")
+	g.P("		}")
+	g.P("		seenKeys[string(dataKey)] = struct{}{}")
+	if needsPKTuple {
+		g.P("		pkTuples = append(pkTuples, pkTuple)")
+	}
+	g.P("		dataKeys = append(dataKeys, dataKey)")
+	if hasDeleteIdx {
+		g.P("		futures = append(futures, tr.Get(dataKey))")
+	}
+	g.P("	}")
+	if hasDeleteIdx {
+		g.P("	entities := make([]*", msg.Name, ", len(dataKeys))")
+		g.P("	for i := range dataKeys {")
+		g.P("		if err := ctx.Err(); err != nil {")
+		g.P("			return err")
+		g.P("		}")
+		g.P("		if value := futures[i].MustGet(); value != nil {")
+		g.P("			var unmarshaled ", msg.Name)
+		g.P("			if err := proto.Unmarshal(value, &unmarshaled); err != nil {")
+		g.P(`				return fmt.Errorf("failed to unmarshal existing `, lowerName, `: %w", err)`)
+		g.P("			}")
+		g.P("			entities[i] = &unmarshaled")
+		g.P("		}")
+		g.P("	}")
+	}
+	iterVar := "i"
+	if !needsPKTuple && !hasDeleteIdx {
+		iterVar = "_"
+	}
+	g.P("	for ", iterVar, ", dataKey := range dataKeys {")
+	g.P("		if err := ctx.Err(); err != nil {")
+	g.P("			return err")
+	g.P("		}")
+	if hasDeleteIdx {
+		if needsPKTuple {
+			g.P("		r.applyDelete(tr, pkTuples[i], dataKey, entities[i])")
+		} else {
+			g.P("		r.applyDelete(tr, dataKey, entities[i])")
+		}
+	} else if needsPKTuple {
+		g.P("		r.applyDelete(tr, pkTuples[i], dataKey)")
+	} else {
+		g.P("		tr.Clear(dataKey)")
+	}
+	g.P("	}")
+	g.P("	return nil")
+	g.P("}")
+	g.P()
+}
+
+func generateApplyDelete(g Printer, msg ir.MessageSpec, hasDeleteIdx, needsPKTuple bool) {
+	lowerName := strings.ToLower(msg.Name)
+	typeIDConst := typeIDConstName(msg)
+	pkTupleVar := "_"
+	if needsPKTuple {
+		pkTupleVar = "pkTuple"
+	}
+
+	if hasDeleteIdx {
+		if needsPKTuple {
+			g.P("func (r *", lowerName, "Repository) applyDelete(tr fdblayer.Transaction, pkTuple tuple.Tuple, dataKey fdb.Key, entity *", msg.Name, ") {")
+		} else {
+			g.P("func (r *", lowerName, "Repository) applyDelete(tr fdblayer.Transaction, dataKey fdb.Key, entity *", msg.Name, ") {")
+		}
+	} else {
+		g.P("func (r *", lowerName, "Repository) applyDelete(tr fdblayer.Transaction, pkTuple tuple.Tuple, dataKey fdb.Key) {")
+	}
+	g.P("	dir := r.dir")
+	if hasDeleteIdx {
+		g.P("	if entity != nil {")
 		for _, idx := range msg.SecondaryIndexes {
 			if idx.IsMutation() {
 				continue
@@ -733,8 +1145,6 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 		}
 	}
 	g.P("	tr.Clear(dataKey)")
-	g.P()
-	g.P("	return nil")
 	g.P("}")
 	g.P()
 }

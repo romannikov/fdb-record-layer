@@ -50,12 +50,61 @@ func (r *postRepository) Insert(ctx context.Context, tr fdblayer.Transaction, en
 	if entity == nil {
 		return fmt.Errorf("post entity cannot be nil")
 	}
-	dir := r.dir
-
-	key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, entity.Id})
+	key := r.dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, entity.Id})
 	if existing := tr.Get(key).MustGet(); existing != nil {
 		return fmt.Errorf("post %w", fdblayer.ErrAlreadyExists)
 	}
+	return r.writeInserted(tr, key, entity)
+}
+
+// InsertBatch creates multiple Post entities in the database, pipelining existence checks into a single round-trip.
+func (r *postRepository) InsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Post, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(entities) == 0 {
+		return nil
+	}
+	dir := r.dir
+	keys := make([]fdb.Key, len(entities))
+	futures := make([]fdb.FutureByteSlice, len(entities))
+	seenKeys := make(map[string]struct{}, len(entities))
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entity == nil {
+			return fmt.Errorf("post entity at index %d cannot be nil", i)
+		}
+		key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, entity.Id})
+		if _, dup := seenKeys[string(key)]; dup {
+			return fmt.Errorf("post at index %d: %w", i, fdblayer.ErrAlreadyExists)
+		}
+		seenKeys[string(key)] = struct{}{}
+		keys[i] = key
+		futures[i] = tr.Get(key)
+	}
+	for i, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if existing := future.MustGet(); existing != nil {
+			return fmt.Errorf("post at index %d: %w", i, fdblayer.ErrAlreadyExists)
+		}
+	}
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.writeInserted(tr, keys[i], entity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *postRepository) writeInserted(tr fdblayer.Transaction, key fdb.Key, entity *Post) error {
+	dir := r.dir
 
 	value, err := proto.Marshal(entity)
 	if err != nil {
@@ -116,6 +165,71 @@ func (r *postRepository) Upsert(ctx context.Context, tr fdblayer.Transaction, en
 		unmarshaled.Id = entity.Id
 		old = &unmarshaled
 	}
+	return r.applyUpsert(tr, key, entity, old)
+}
+
+// UpsertBatch inserts or updates multiple Post entities in the database, pipelining existing-record reads into a single round-trip.
+func (r *postRepository) UpsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Post, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(entities) == 0 {
+		return nil
+	}
+	dir := r.dir
+	keys := make([]fdb.Key, len(entities))
+	futures := make([]fdb.FutureByteSlice, len(entities))
+	seenKeys := make(map[string]struct{}, len(entities))
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entity == nil {
+			return fmt.Errorf("post entity at index %d cannot be nil", i)
+		}
+		key := dir.Pack(tuple.Tuple{PostTypeID, fdblayer.DataNamespace, entity.Id})
+		keys[i] = key
+		if _, seen := seenKeys[string(key)]; !seen {
+			seenKeys[string(key)] = struct{}{}
+			futures[i] = tr.Get(key)
+		}
+	}
+	batchOld := make(map[string]*Post, len(seenKeys))
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		keyStr := string(keys[i])
+		if _, seen := batchOld[keyStr]; !seen {
+			var old *Post
+			if oldValue := futures[i].MustGet(); oldValue != nil {
+				var unmarshaled Post
+				if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {
+					return fmt.Errorf("failed to unmarshal existing post at index %d: %w", i, err)
+				}
+				unmarshaled.Id = entity.Id
+				old = &unmarshaled
+			}
+			batchOld[keyStr] = old
+		}
+	}
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		key := keys[i]
+		keyStr := string(key)
+		old := batchOld[keyStr]
+		if err := r.applyUpsert(tr, key, entity, old); err != nil {
+			return err
+		}
+		batchOld[keyStr] = proto.Clone(entity).(*Post)
+	}
+	return nil
+}
+
+func (r *postRepository) applyUpsert(tr fdblayer.Transaction, key fdb.Key, entity *Post, old *Post) error {
+	dir := r.dir
 
 	value, err := proto.Marshal(entity)
 	if err != nil {
@@ -217,12 +331,72 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, ke
 	if err != nil {
 		return err
 	}
-	value := tr.Get(dataKey).MustGet()
-	if value != nil {
-		entity := &Post{}
-		if err := proto.Unmarshal(value, entity); err != nil {
+	var entity *Post
+	if value := tr.Get(dataKey).MustGet(); value != nil {
+		var unmarshaled Post
+		if err := proto.Unmarshal(value, &unmarshaled); err != nil {
 			return fmt.Errorf("failed to unmarshal existing post: %w", err)
 		}
+		entity = &unmarshaled
+	}
+	r.applyDelete(tr, pkTuple, dataKey, entity)
+	return nil
+}
+
+// DeleteBatch removes multiple Post entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.
+func (r *postRepository) DeleteBatch(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	dir := r.dir
+	pkTuples := make([]tuple.Tuple, 0, len(keys))
+	dataKeys := make([]fdb.Key, 0, len(keys))
+	futures := make([]fdb.FutureByteSlice, 0, len(keys))
+	seenKeys := make(map[string]struct{}, len(keys))
+	for i, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, PostTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+		if err != nil {
+			return fmt.Errorf("at index %d: %w", i, err)
+		}
+		if _, seen := seenKeys[string(dataKey)]; seen {
+			continue
+		}
+		seenKeys[string(dataKey)] = struct{}{}
+		pkTuples = append(pkTuples, pkTuple)
+		dataKeys = append(dataKeys, dataKey)
+		futures = append(futures, tr.Get(dataKey))
+	}
+	entities := make([]*Post, len(dataKeys))
+	for i := range dataKeys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if value := futures[i].MustGet(); value != nil {
+			var unmarshaled Post
+			if err := proto.Unmarshal(value, &unmarshaled); err != nil {
+				return fmt.Errorf("failed to unmarshal existing post: %w", err)
+			}
+			entities[i] = &unmarshaled
+		}
+	}
+	for i, dataKey := range dataKeys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		r.applyDelete(tr, pkTuples[i], dataKey, entities[i])
+	}
+	return nil
+}
+
+func (r *postRepository) applyDelete(tr fdblayer.Transaction, pkTuple tuple.Tuple, dataKey fdb.Key, entity *Post) {
+	dir := r.dir
+	if entity != nil {
 		// Fan-out index
 		{
 			seen := make(map[string]struct{}, len(entity.Tags))
@@ -258,8 +432,6 @@ func (r *postRepository) Delete(ctx context.Context, tr fdblayer.Transaction, ke
 	// Primary-key-scoped mutation index
 	tr.Clear(dir.Pack(tuple.Tuple{PostTypeID, fdblayer.IndexNamespace, int64(PostMaxLatencyById), pkTuple[0]}))
 	tr.Clear(dataKey)
-
-	return nil
 }
 
 // Mutate applies an atomic mutation (ADD, COUNT, MIN, MAX) to a mutation secondary index of Post.
