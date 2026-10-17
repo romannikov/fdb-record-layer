@@ -160,14 +160,18 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 		"OrderByHashes fdblayer.IndexID = 2002",
 		"func NewOrderRepository(dir directory.DirectorySubspace) OrderRepository {",
 		"func (r *orderRepository) Insert(ctx context.Context, tr fdblayer.Transaction, entity *Order, opts ...fdblayer.WriteOption) error",
+		"func (r *orderRepository) InsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Order, opts ...fdblayer.WriteOption) error",
 		"func (r *orderRepository) Upsert(ctx context.Context, tr fdblayer.Transaction, entity *Order, opts ...fdblayer.WriteOption) error",
+		"func (r *orderRepository) UpsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Order, opts ...fdblayer.WriteOption) error",
 		"func (r *orderRepository) Delete(ctx context.Context, tr fdblayer.Transaction, key fdblayer.Key) error",
+		"func (r *orderRepository) DeleteBatch(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error",
 		"func (r *orderRepository) ReadRow(ctx context.Context, tr fdblayer.Transaction, key fdblayer.Key) (*Order, error)",
 		"func (r *orderRepository) ReadRows(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) ([]*Order, error)",
 		"func (r *orderRepository) Scan(ctx context.Context, tr fdblayer.Transaction, kr fdblayer.KeyRange, opts ...fdblayer.ScanOption) (*fdblayer.Page[*Order], error)",
 		"func (r *orderRepository) ScanIndex(ctx context.Context, tr fdblayer.Transaction, index fdblayer.IndexID, kr fdblayer.KeyRange, opts ...fdblayer.ScanOption) (*fdblayer.Page[*Order], error)",
 		"fdblayer.ErrNotFound",
 		"oldSet := make(map[string]struct{}, len(old.Hashes))",
+		"batchOld[keyStr] = proto.Clone(entity).(*Order)",
 	} {
 		if !strings.Contains(out, expectedSnippet) {
 			t.Errorf("expected generated Go code to contain %q, got:\n%s", expectedSnippet, out)
@@ -202,11 +206,13 @@ func TestGenerateMessage_EntityAndQueue(t *testing.T) {
 		"const TaskMessageTypeID int64 = 42",
 		"func NewTaskMessageRepository(dir directory.DirectorySubspace) TaskMessageRepository {",
 		"func (r *taskmessageRepository) Enqueue(ctx context.Context, tr fdblayer.Transaction, entity *TaskMessage, opts ...fdblayer.WriteOption)",
+		"func (r *taskmessageRepository) EnqueueBatch(ctx context.Context, tr fdblayer.Transaction, entities []*TaskMessage, opts ...fdblayer.WriteOption)",
 		"func (r *taskmessageRepository) Dequeue(ctx context.Context, tr fdblayer.Transaction, partitionKey fdblayer.Key)",
 		"func (r *taskmessageRepository) DequeueBatch(ctx context.Context, tr fdblayer.Transaction, partitionKey fdblayer.Key, limit int)",
 		"writeCfg := fdblayer.ApplyWriteOptions(opts)",
 		"tr.SetVersionstampedKey(key, value)",
 		"tuple.IncompleteVersionstamp(writeCfg.UserVersion)",
+		"fdblayer.WithUserVersion(writeCfg.UserVersion+uint16(i))",
 	} {
 		if !strings.Contains(qOut, expectedSnippet) {
 			t.Errorf("expected generated Go queue code to contain %q, got:\n%s", expectedSnippet, qOut)

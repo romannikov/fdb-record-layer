@@ -1202,3 +1202,80 @@ func TestIntegration_AggregateSecondaryIndexes_PostAndOrder(t *testing.T) {
 		return nil
 	})
 }
+
+func TestIntegration_BatchWrites_QueueAndAuditLog(t *testing.T) {
+	ctx := context.Background()
+	db := fdb.MustOpenDefault()
+	dir, cleanup := tests.TestDir(t, db)
+	defer cleanup()
+
+	taskRepo := store.NewTaskMessageRepository(dir)
+	auditRepo := store.NewAuditLogRepository(dir)
+
+	// 1. EnqueueBatch on live FDB in a single transaction
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return taskRepo.EnqueueBatch(ctx, tr, []*store.TaskMessage{
+			{QueueName: "live_batch_q", ShardId: 1, Payload: []byte("first")},
+			{QueueName: "live_batch_q", ShardId: 2, Payload: []byte("second")},
+			{QueueName: "live_batch_q", ShardId: 3, Payload: []byte("third")},
+		})
+	})
+
+	var popped []*store.TaskMessage
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		popped, err = taskRepo.DequeueBatch(ctx, tr, fdblayer.Key{"live_batch_q"}, 10)
+		return err
+	})
+	if len(popped) != 3 || string(popped[0].Payload) != "first" || string(popped[1].Payload) != "second" || string(popped[2].Payload) != "third" {
+		t.Fatalf("unexpected DequeueBatch after EnqueueBatch: %+v", popped)
+	}
+
+	// 2. InsertBatch and UpsertBatch on versionstamped AuditLog
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return auditRepo.InsertBatch(ctx, tr, []*store.AuditLog{
+			{Actor: "alice", Views: 10, Tags: []string{"t1", "t2"}},
+			{Actor: "bob", Views: 20, Tags: []string{"t2"}},
+		})
+	})
+
+	var listed *fdblayer.Page[*store.AuditLog]
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		var err error
+		listed, err = auditRepo.Scan(ctx, tr, fdblayer.AllKeys())
+		return err
+	})
+	if len(listed.Items) != 2 {
+		t.Fatalf("expected 2 AuditLogs after InsertBatch, got %+v", listed)
+	}
+	aliceID := listed.Items[0].LogId
+	bobID := listed.Items[1].LogId
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		return auditRepo.UpsertBatch(ctx, tr, []*store.AuditLog{
+			{LogId: aliceID, Actor: "alice", Views: 15, Tags: []string{"t2", "t3"}},
+			{LogId: aliceID, Actor: "alice_v2", Views: 30, Tags: []string{"t3"}},
+			{Actor: "carol", Views: 40, Tags: []string{"t1"}},
+		})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		byAlice, err := auditRepo.ScanIndex(ctx, tr, store.AuditLogByActor, fdblayer.Prefix("alice"))
+		if err != nil || len(byAlice.Items) != 0 {
+			t.Fatalf("expected 0 logs for old Actor 'alice', got %+v, err=%v", byAlice, err)
+		}
+		byAliceV2, err := auditRepo.ScanIndex(ctx, tr, store.AuditLogByActor, fdblayer.Prefix("alice_v2"))
+		if err != nil || len(byAliceV2.Items) != 1 || byAliceV2.Items[0].Views != 30 {
+			t.Fatalf("expected 1 log for 'alice_v2' with Views=30, got %+v, err=%v", byAliceV2, err)
+		}
+		return auditRepo.DeleteBatch(ctx, tr, []fdblayer.Key{{aliceID}, {bobID}, {aliceID}})
+	})
+
+	tests.WithTx(t, db, func(tr fdb.Transaction) error {
+		remaining, err := auditRepo.Scan(ctx, tr, fdblayer.AllKeys())
+		if err != nil || len(remaining.Items) != 1 || remaining.Items[0].Actor != "carol" {
+			t.Fatalf("expected only carol remaining after DeleteBatch, got %+v, err=%v", remaining, err)
+		}
+		return nil
+	})
+}

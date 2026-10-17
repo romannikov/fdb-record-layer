@@ -6,12 +6,12 @@ A `protoc` compiler and runtime library that generates FoundationDB data access 
 
 ## Supported Features
 
-- **Type-Safe CRUD & Batch Reads**: Insert, upsert, delete, and fetch Protobuf records by single-field or composite primary keys, including pipelined batch reads that fetch multiple records in a single network round-trip.
+- **Type-Safe CRUD & Pipelined Batch Operations**: Insert, upsert, delete, and fetch Protobuf records by single-field or composite primary keys, including pipelined batch reads (`ReadRows`) and batch writes (`InsertBatch`, `UpsertBatch`, `DeleteBatch`) that issue all `tr.Get` futures concurrently in a single network round-trip.
 - **Range Scans & Cursor Pagination**: Query primary keys or secondary indexes by exact match, leading tuple prefix, or bounded `[begin, end)` range with configurable page limits, reverse iteration, and resume cursors.
-- **Secondary & Fan-Out Indexes**: Index scalar, composite, or `repeated` (fan-out) fields directly from Protobuf annotations. The generated repository automatically maintains index entries on `Insert`, `Upsert` (updating only changed index deltas), and `Delete`.
+- **Secondary & Fan-Out Indexes**: Index scalar, composite, or `repeated` (fan-out) fields directly from Protobuf annotations. The generated repository automatically maintains index entries on `Insert`, `InsertBatch`, `Upsert`, `UpsertBatch` (updating only changed index deltas), `Delete`, and `DeleteBatch`.
 - **Automatic Aggregate Indexes (`COUNT`, `SUM`, `MIN`, `MAX`)**: Maintain conflict-free group-by rollups (or global table-wide totals) automatically whenever records are inserted, upserted, or deleted, and read the aggregated value in $O(1)$ via `ReadAggregate`.
 - **Manual Atomic Mutation Indexes (`COUNT`, `ADD`, `MIN`, `MAX`)**: Update high-contention counters and watermarks (such as view counts, likes, or peak latency) in 0 RTTs via `Mutate` without reading or rewriting the underlying Protobuf record.
-- **Versionstamped Keys & FIFO Queues**: Order records by commit time or turn a message into a transactional FIFO queue (`Enqueue`, `Dequeue`, `DequeueBatch`) powered by FoundationDB 12-byte versionstamps.
+- **Versionstamped Keys & FIFO Queues**: Order records by commit time or turn a message into a transactional FIFO queue (`Enqueue`, `EnqueueBatch`, `Dequeue`, `DequeueBatch`) powered by FoundationDB 12-byte versionstamps.
 
 ---
 
@@ -174,7 +174,15 @@ func main() {
 
 		// Upsert user (updates record and maintains secondary index deltas)
 		user.Name = "John Doe"
-		return nil, userRepo.Upsert(ctx, tr, user)
+		if err := userRepo.Upsert(ctx, tr, user); err != nil {
+			return nil, err
+		}
+
+		// Pipelined batch upsert (issues all existing-record reads concurrently in 1 network round-trip)
+		return nil, userRepo.UpsertBatch(ctx, tr, []*generated.User{
+			{Id: "u123", Email: "john.doe@example.com", Name: "John Doe"},
+			{Id: "u124", Email: "jane@example.com", Name: "Jane Doe"},
+		})
 	})
 	if err != nil {
 		panic(err)
@@ -325,23 +333,19 @@ _, err := db.Transact(func(tr fdb.Transaction) (any, error) {
 		return nil, err
 	}
 
-	// Enqueue a welcome email task in the same transaction (defaults to userVersion 0)
-	task1 := &generated.Task{
-		QueueName: "send-email",
-		ShardId:   uint32(rand.Intn(10)),
-		Payload:   []byte("u123"),
-	}
-	if err := taskRepo.Enqueue(ctx, tr, task1); err != nil {
-		return nil, err
-	}
-
-	// Enqueue a second task in the same transaction using fdblayer.WithUserVersion(1)
-	task2 := &generated.Task{
-		QueueName: "send-email",
-		ShardId:   uint32(rand.Intn(10)),
-		Payload:   []byte("u123-audit"),
-	}
-	return nil, taskRepo.Enqueue(ctx, tr, task2, fdblayer.WithUserVersion(1))
+	// Enqueue multiple tasks in the same transaction (automatically increments UserVersion per item)
+	return nil, taskRepo.EnqueueBatch(ctx, tr, []*generated.Task{
+		{
+			QueueName: "send-email",
+			ShardId:   uint32(rand.Intn(10)),
+			Payload:   []byte("u123"),
+		},
+		{
+			QueueName: "send-email",
+			ShardId:   uint32(rand.Intn(10)),
+			Payload:   []byte("u123-audit"),
+		},
+	})
 })
 ```
 

@@ -1165,3 +1165,140 @@ func TestMutationIndexes_Post_CountAddMinMaxAndDelete(t *testing.T) {
 		t.Fatalf("expected PostMaxLatencyById=math.MaxInt64, got %d, err=%v", gotMax, err)
 	}
 }
+
+func TestInsertBatchUser_SuccessAndValidation(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, kv := tests.Setup()
+	repo := store.NewUserRepository(dir)
+
+	// 1. Empty batch is a no-op.
+	if err := repo.InsertBatch(ctx, tr, nil); err != nil {
+		t.Fatalf("InsertBatch(nil) failed: %v", err)
+	}
+
+	// 2. Nil entity in batch returns error before writing anything.
+	if err := repo.InsertBatch(ctx, tr, []*store.User{{Id: "u1", Name: "Alice", Email: "a@test.com"}, nil}); err == nil {
+		t.Fatal("expected error when batch contains nil entity")
+	}
+	if _, err := repo.ReadRow(ctx, tr, fdblayer.Key{"u1"}); !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected u1 not to be written after nil entity error, got %v", err)
+	}
+
+	// 3. Intra-batch duplicate primary key returns ErrAlreadyExists before writing anything.
+	err := repo.InsertBatch(ctx, tr, []*store.User{
+		{Id: "u1", Name: "Alice", Email: "a@test.com"},
+		{Id: "u1", Name: "Alice Dup", Email: "adup@test.com"},
+	})
+	if !errors.Is(err, fdblayer.ErrAlreadyExists) {
+		t.Fatalf("expected ErrAlreadyExists on intra-batch duplicate key, got %v", err)
+	}
+	if _, err := repo.ReadRow(ctx, tr, fdblayer.Key{"u1"}); !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected u1 not to be written after intra-batch duplicate error, got %v", err)
+	}
+
+	// 4. Valid batch inserts all records and secondary indexes.
+	users := []*store.User{
+		{Id: "u1", Name: "Alice", Email: "alice@test.com"},
+		{Id: "u2", Name: "Bob", Email: "bob@test.com"},
+		{Id: "u3", Name: "Carol", Email: "carol@test.com"},
+	}
+	if err := repo.InsertBatch(ctx, tr, users); err != nil {
+		t.Fatalf("InsertBatch failed: %v", err)
+	}
+	rows, err := repo.ReadRows(ctx, tr, []fdblayer.Key{{"u1"}, {"u2"}, {"u3"}})
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("ReadRows after InsertBatch failed: len=%d, err=%v", len(rows), err)
+	}
+
+	// 5. Batch containing an already-existing DB key fails atomically before mutating any keys in the batch.
+	err = repo.InsertBatch(ctx, tr, []*store.User{
+		{Id: "u4", Name: "Dave", Email: "dave@test.com"},
+		{Id: "u2", Name: "Bob Overwrite", Email: "bob2@test.com"},
+	})
+	if !errors.Is(err, fdblayer.ErrAlreadyExists) {
+		t.Fatalf("expected ErrAlreadyExists when u2 already exists in DB, got %v", err)
+	}
+	if _, err := repo.ReadRow(ctx, tr, fdblayer.Key{"u4"}); !errors.Is(err, fdblayer.ErrNotFound) {
+		t.Fatalf("expected u4 not to be written when another item in the batch already exists, got %v", err)
+	}
+	bob2Idx := tuple.Tuple{store.UserTypeID, fdblayer.IndexNamespace, int64(store.UserByEmail), "bob2@test.com", "u2"}.Pack()
+	if kv.HasKey(bob2Idx) {
+		t.Fatal("failed InsertBatch must not write secondary index entries")
+	}
+}
+
+func TestUpsertBatchAndDeleteBatchProduct_IntraBatchDuplicatesAndAggregates(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, _ := tests.Setup()
+	repo := store.NewProductRepository(dir)
+
+	// 1. Seed initial products via InsertBatch.
+	if err := repo.InsertBatch(ctx, tr, []*store.Product{
+		{Id: "p1", Name: "Book 1", Category: "books", Price: 20},
+		{Id: "p2", Name: "Book 2", Category: "books", Price: 30},
+	}); err != nil {
+		t.Fatalf("InsertBatch failed: %v", err)
+	}
+
+	// 2. UpsertBatch containing:
+	//    - Update to existing p1 (books, 20 -> books, 25)
+	//    - Second update to p1 in the SAME batch (books, 25 -> games, 40)
+	//    - New product p3 (games, 60)
+	//    - Second update to p3 in the SAME batch (games, 60 -> games, 50)
+	if err := repo.UpsertBatch(ctx, tr, []*store.Product{
+		{Id: "p1", Name: "Book 1 v2", Category: "books", Price: 25},
+		{Id: "p1", Name: "Game 1", Category: "games", Price: 40},
+		{Id: "p3", Name: "Game 3 v1", Category: "games", Price: 60},
+		{Id: "p3", Name: "Game 3 v2", Category: "games", Price: 50},
+	}); err != nil {
+		t.Fatalf("UpsertBatch failed: %v", err)
+	}
+
+	// Verify final state:
+	// - p1 is in "games" with Price 40 (and NOT in "books" index)
+	// - p2 is in "books" with Price 30
+	// - p3 is in "games" with Price 50
+	booksScan, err := repo.ScanIndex(ctx, tr, store.ProductByCategory, fdblayer.Prefix("books"))
+	if err != nil || len(booksScan.Items) != 1 || booksScan.Items[0].Id != "p2" {
+		t.Fatalf("expected only p2 in books index, got %+v, err=%v", booksScan, err)
+	}
+	gamesScan, err := repo.ScanIndex(ctx, tr, store.ProductByCategory, fdblayer.Prefix("games"))
+	if err != nil || len(gamesScan.Items) != 2 {
+		t.Fatalf("expected p1 and p3 in games index, got %+v, err=%v", gamesScan, err)
+	}
+
+	// Verify aggregates:
+	// Total count = 3 (p1, p2, p3)
+	// books: count = 1, sum = 30
+	// games: count = 2, sum = 90 (40 + 50)
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductCount, fdblayer.Key{}); got != 3 {
+		t.Fatalf("expected total ProductCount=3, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"books"}); got != 1 {
+		t.Fatalf("expected books COUNT=1, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"books"}); got != 30 {
+		t.Fatalf("expected books SUM=30, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"games"}); got != 2 {
+		t.Fatalf("expected games COUNT=2, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"games"}); got != 90 {
+		t.Fatalf("expected games SUM=90, got %d", got)
+	}
+
+	// 3. DeleteBatch with duplicate keys ("p1" twice) and a non-existent key ("ghost"):
+	//    Must only decrement games COUNT by 1 and games SUM by 40.
+	if err := repo.DeleteBatch(ctx, tr, []fdblayer.Key{{"p1"}, {"p1"}, {"ghost"}}); err != nil {
+		t.Fatalf("DeleteBatch failed: %v", err)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductCount, fdblayer.Key{}); got != 2 {
+		t.Fatalf("expected total ProductCount=2 after DeleteBatch, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductCountByCategory, fdblayer.Key{"games"}); got != 1 {
+		t.Fatalf("expected games COUNT=1 after DeleteBatch, got %d", got)
+	}
+	if got, _ := repo.ReadAggregate(ctx, tr, store.ProductSumPriceByCategory, fdblayer.Key{"games"}); got != 50 {
+		t.Fatalf("expected games SUM=50 after DeleteBatch, got %d", got)
+	}
+}

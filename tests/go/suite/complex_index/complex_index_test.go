@@ -1179,3 +1179,114 @@ func TestComplexIndex_DeduplicatedPKInCompositeSecondaryIndex(t *testing.T) {
 		t.Fatalf("expected only beta order after deleting (acme, 10), got %+v, err=%v", afterDel, err)
 	}
 }
+
+func TestEnqueueBatch_TaskMessage(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, _ := tests.Setup()
+	taskRepo := store.NewTaskMessageRepository(dir)
+
+	// 1. Empty slice is a no-op.
+	if err := taskRepo.EnqueueBatch(ctx, tr, nil); err != nil {
+		t.Fatalf("EnqueueBatch(nil) failed: %v", err)
+	}
+
+	// 2. Nil item or overflow returns error before writing anything.
+	if err := taskRepo.EnqueueBatch(ctx, tr, []*store.TaskMessage{{QueueName: "q1", ShardId: 1}, nil}); err == nil {
+		t.Fatal("expected error for nil message in EnqueueBatch")
+	}
+	err := taskRepo.EnqueueBatch(ctx, tr, []*store.TaskMessage{
+		{QueueName: "q1", ShardId: 1, Payload: []byte("a")},
+		{QueueName: "q1", ShardId: 1, Payload: []byte("b")},
+	}, fdblayer.WithUserVersion(0xFFFF))
+	if !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on UserVersion overflow in EnqueueBatch, got %v", err)
+	}
+
+	// 3. Valid EnqueueBatch increments UserVersion sequentially and DequeueBatch pops in FIFO order.
+	if err := taskRepo.EnqueueBatch(ctx, tr, []*store.TaskMessage{
+		{QueueName: "q1", ShardId: 1, Payload: []byte("first")},
+		{QueueName: "q1", ShardId: 2, Payload: []byte("second")},
+		{QueueName: "q1", ShardId: 3, Payload: []byte("third")},
+	}, fdblayer.WithUserVersion(10)); err != nil {
+		t.Fatalf("EnqueueBatch failed: %v", err)
+	}
+	popped, err := taskRepo.DequeueBatch(ctx, tr, fdblayer.Key{"q1"}, 10)
+	if err != nil || len(popped) != 3 {
+		t.Fatalf("DequeueBatch failed: len=%d, err=%v", len(popped), err)
+	}
+	if string(popped[0].Payload) != "first" || string(popped[1].Payload) != "second" || string(popped[2].Payload) != "third" {
+		t.Fatalf("unexpected FIFO order from EnqueueBatch: %+v", popped)
+	}
+}
+
+func TestInsertBatchAndUpsertBatch_AuditLog_Versionstamps(t *testing.T) {
+	ctx := context.Background()
+	tr, dir, _ := tests.Setup()
+	auditRepo := store.NewAuditLogRepository(dir)
+
+	// 1. Overflow check in InsertBatch.
+	err := auditRepo.InsertBatch(ctx, tr, []*store.AuditLog{
+		{Actor: "alice", Views: 1},
+		{Actor: "bob", Views: 2},
+	}, fdblayer.WithUserVersion(0xFFFF))
+	if !errors.Is(err, fdblayer.ErrInvalidKey) {
+		t.Fatalf("expected ErrInvalidKey on UserVersion overflow in InsertBatch, got %v", err)
+	}
+
+	// 2. InsertBatch with 2 logs assigns sequential UserVersions.
+	if err := auditRepo.InsertBatch(ctx, tr, []*store.AuditLog{
+		{Actor: "alice", Views: 10, Tags: []string{"t1", "t2"}},
+		{Actor: "bob", Views: 20, Tags: []string{"t2"}},
+	}, fdblayer.WithUserVersion(5)); err != nil {
+		t.Fatalf("InsertBatch(AuditLog) failed: %v", err)
+	}
+
+	allLogs, err := auditRepo.Scan(ctx, tr, fdblayer.AllKeys())
+	if err != nil || len(allLogs.Items) != 2 {
+		t.Fatalf("expected 2 AuditLogs after InsertBatch, got %+v, err=%v", allLogs, err)
+	}
+	aliceID := allLogs.Items[0].LogId
+	if len(aliceID) != 12 {
+		t.Fatalf("expected 12-byte hydrated LogId, got %d bytes", len(aliceID))
+	}
+
+	// 3. UpsertBatch mixing:
+	//    - An update to existing aliceID (Actor: "alice", Tags: ["t2", "t3"])
+	//    - A second update to the SAME aliceID in the same batch (Actor: "alice_v2", Tags: ["t3"])
+	//    - A new log with 0-byte LogId (Actor: "carol", Tags: ["t1"])
+	if err := auditRepo.UpsertBatch(ctx, tr, []*store.AuditLog{
+		{LogId: aliceID, Actor: "alice", Views: 15, Tags: []string{"t2", "t3"}},
+		{LogId: aliceID, Actor: "alice_v2", Views: 30, Tags: []string{"t3"}},
+		{Actor: "carol", Views: 40, Tags: []string{"t1"}},
+	}); err != nil {
+		t.Fatalf("UpsertBatch(AuditLog) failed: %v", err)
+	}
+
+	// Verify old Actor="alice" index was cleared and "alice_v2" is indexed.
+	if res, err := auditRepo.ScanIndex(ctx, tr, store.AuditLogByActor, fdblayer.Prefix("alice")); err != nil || len(res.Items) != 0 {
+		t.Fatalf("expected 0 logs for old Actor 'alice', got %+v, err=%v", res, err)
+	}
+	if res, err := auditRepo.ScanIndex(ctx, tr, store.AuditLogByActor, fdblayer.Prefix("alice_v2")); err != nil || len(res.Items) != 1 || res.Items[0].Views != 30 {
+		t.Fatalf("expected 1 log for 'alice_v2' with Views=30, got %+v, err=%v", res, err)
+	}
+	// Verify tag "t1" has only carol's new log, "t2" has only bob's log, and "t3" has alice_v2's log.
+	if res, err := auditRepo.ScanIndex(ctx, tr, store.AuditLogByTags, fdblayer.Prefix("t1")); err != nil || len(res.Items) != 1 || res.Items[0].Actor != "carol" {
+		t.Fatalf("expected only carol in tag 't1', got %+v, err=%v", res, err)
+	}
+	if res, err := auditRepo.ScanIndex(ctx, tr, store.AuditLogByTags, fdblayer.Prefix("t2")); err != nil || len(res.Items) != 1 || res.Items[0].Actor != "bob" {
+		t.Fatalf("expected only bob in tag 't2', got %+v, err=%v", res, err)
+	}
+	if res, err := auditRepo.ScanIndex(ctx, tr, store.AuditLogByTags, fdblayer.Prefix("t3")); err != nil || len(res.Items) != 1 || res.Items[0].Actor != "alice_v2" {
+		t.Fatalf("expected only alice_v2 in tag 't3', got %+v, err=%v", res, err)
+	}
+
+	// 4. DeleteBatch removes alice_v2 and bob (including duplicate key in batch).
+	bobID := allLogs.Items[1].LogId
+	if err := auditRepo.DeleteBatch(ctx, tr, []fdblayer.Key{{aliceID}, {bobID}, {aliceID}}); err != nil {
+		t.Fatalf("DeleteBatch(AuditLog) failed: %v", err)
+	}
+	remaining, err := auditRepo.Scan(ctx, tr, fdblayer.AllKeys())
+	if err != nil || len(remaining.Items) != 1 || remaining.Items[0].Actor != "carol" {
+		t.Fatalf("expected only carol remaining after DeleteBatch, got %+v, err=%v", remaining, err)
+	}
+}

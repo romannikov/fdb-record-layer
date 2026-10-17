@@ -49,12 +49,61 @@ func (r *productRepository) Insert(ctx context.Context, tr fdblayer.Transaction,
 	if entity == nil {
 		return fmt.Errorf("product entity cannot be nil")
 	}
-	dir := r.dir
-
-	key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, entity.Id})
+	key := r.dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, entity.Id})
 	if existing := tr.Get(key).MustGet(); existing != nil {
 		return fmt.Errorf("product %w", fdblayer.ErrAlreadyExists)
 	}
+	return r.writeInserted(tr, key, entity)
+}
+
+// InsertBatch creates multiple Product entities in the database, pipelining existence checks into a single round-trip.
+func (r *productRepository) InsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Product, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(entities) == 0 {
+		return nil
+	}
+	dir := r.dir
+	keys := make([]fdb.Key, len(entities))
+	futures := make([]fdb.FutureByteSlice, len(entities))
+	seenKeys := make(map[string]struct{}, len(entities))
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entity == nil {
+			return fmt.Errorf("product entity at index %d cannot be nil", i)
+		}
+		key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, entity.Id})
+		if _, dup := seenKeys[string(key)]; dup {
+			return fmt.Errorf("product at index %d: %w", i, fdblayer.ErrAlreadyExists)
+		}
+		seenKeys[string(key)] = struct{}{}
+		keys[i] = key
+		futures[i] = tr.Get(key)
+	}
+	for i, future := range futures {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if existing := future.MustGet(); existing != nil {
+			return fmt.Errorf("product at index %d: %w", i, fdblayer.ErrAlreadyExists)
+		}
+	}
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := r.writeInserted(tr, keys[i], entity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *productRepository) writeInserted(tr fdblayer.Transaction, key fdb.Key, entity *Product) error {
+	dir := r.dir
 
 	value, err := proto.Marshal(entity)
 	if err != nil {
@@ -108,6 +157,71 @@ func (r *productRepository) Upsert(ctx context.Context, tr fdblayer.Transaction,
 		unmarshaled.Id = entity.Id
 		old = &unmarshaled
 	}
+	return r.applyUpsert(tr, key, entity, old)
+}
+
+// UpsertBatch inserts or updates multiple Product entities in the database, pipelining existing-record reads into a single round-trip.
+func (r *productRepository) UpsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Product, opts ...fdblayer.WriteOption) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(entities) == 0 {
+		return nil
+	}
+	dir := r.dir
+	keys := make([]fdb.Key, len(entities))
+	futures := make([]fdb.FutureByteSlice, len(entities))
+	seenKeys := make(map[string]struct{}, len(entities))
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if entity == nil {
+			return fmt.Errorf("product entity at index %d cannot be nil", i)
+		}
+		key := dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.DataNamespace, entity.Id})
+		keys[i] = key
+		if _, seen := seenKeys[string(key)]; !seen {
+			seenKeys[string(key)] = struct{}{}
+			futures[i] = tr.Get(key)
+		}
+	}
+	batchOld := make(map[string]*Product, len(seenKeys))
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		keyStr := string(keys[i])
+		if _, seen := batchOld[keyStr]; !seen {
+			var old *Product
+			if oldValue := futures[i].MustGet(); oldValue != nil {
+				var unmarshaled Product
+				if err := proto.Unmarshal(oldValue, &unmarshaled); err != nil {
+					return fmt.Errorf("failed to unmarshal existing product at index %d: %w", i, err)
+				}
+				unmarshaled.Id = entity.Id
+				old = &unmarshaled
+			}
+			batchOld[keyStr] = old
+		}
+	}
+	for i, entity := range entities {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		key := keys[i]
+		keyStr := string(key)
+		old := batchOld[keyStr]
+		if err := r.applyUpsert(tr, key, entity, old); err != nil {
+			return err
+		}
+		batchOld[keyStr] = proto.Clone(entity).(*Product)
+	}
+	return nil
+}
+
+func (r *productRepository) applyUpsert(tr fdblayer.Transaction, key fdb.Key, entity *Product, old *Product) error {
+	dir := r.dir
 
 	value, err := proto.Marshal(entity)
 	if err != nil {
@@ -177,12 +291,72 @@ func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 	if err != nil {
 		return err
 	}
-	value := tr.Get(dataKey).MustGet()
-	if value != nil {
-		entity := &Product{}
-		if err := proto.Unmarshal(value, entity); err != nil {
+	var entity *Product
+	if value := tr.Get(dataKey).MustGet(); value != nil {
+		var unmarshaled Product
+		if err := proto.Unmarshal(value, &unmarshaled); err != nil {
 			return fmt.Errorf("failed to unmarshal existing product: %w", err)
 		}
+		entity = &unmarshaled
+	}
+	r.applyDelete(tr, pkTuple, dataKey, entity)
+	return nil
+}
+
+// DeleteBatch removes multiple Product entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.
+func (r *productRepository) DeleteBatch(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	dir := r.dir
+	pkTuples := make([]tuple.Tuple, 0, len(keys))
+	dataKeys := make([]fdb.Key, 0, len(keys))
+	futures := make([]fdb.FutureByteSlice, 0, len(keys))
+	seenKeys := make(map[string]struct{}, len(keys))
+	for i, key := range keys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		pkTuple, dataKey, err := fdblayer.PackPrimaryKey(dir, ProductTypeID, key, []fdblayer.FieldKind{fdblayer.FieldKindString})
+		if err != nil {
+			return fmt.Errorf("at index %d: %w", i, err)
+		}
+		if _, seen := seenKeys[string(dataKey)]; seen {
+			continue
+		}
+		seenKeys[string(dataKey)] = struct{}{}
+		pkTuples = append(pkTuples, pkTuple)
+		dataKeys = append(dataKeys, dataKey)
+		futures = append(futures, tr.Get(dataKey))
+	}
+	entities := make([]*Product, len(dataKeys))
+	for i := range dataKeys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if value := futures[i].MustGet(); value != nil {
+			var unmarshaled Product
+			if err := proto.Unmarshal(value, &unmarshaled); err != nil {
+				return fmt.Errorf("failed to unmarshal existing product: %w", err)
+			}
+			entities[i] = &unmarshaled
+		}
+	}
+	for i, dataKey := range dataKeys {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		r.applyDelete(tr, pkTuples[i], dataKey, entities[i])
+	}
+	return nil
+}
+
+func (r *productRepository) applyDelete(tr fdblayer.Transaction, pkTuple tuple.Tuple, dataKey fdb.Key, entity *Product) {
+	dir := r.dir
+	if entity != nil {
 		// Standard index
 		tr.Clear(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductByCategory), entity.Category, pkTuple[0]}))
 		// Aggregate index
@@ -195,8 +369,6 @@ func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 		tr.Add(dir.Pack(tuple.Tuple{ProductTypeID, fdblayer.IndexNamespace, int64(ProductCount)}), fdblayer.EncodeDeltaLE(-1))
 	}
 	tr.Clear(dataKey)
-
-	return nil
 }
 
 // Mutate applies an atomic mutation (ADD, COUNT, MIN, MAX) to a mutation secondary index of Product.
