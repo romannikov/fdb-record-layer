@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/romannikov/fdb-layer/compiler/backend"
-	"github.com/romannikov/fdb-layer/compiler/ir"
+	"github.com/romannikov/fdb-record-layer/compiler/backend"
+	"github.com/romannikov/fdb-record-layer/compiler/ir"
 )
 
 // Printer abstracts protogen.GeneratedFile.P so Go repository generation can be unit-tested without protogen.
@@ -85,7 +85,7 @@ func generateHeader(g Printer, msg ir.MessageSpec) {
 	g.P(`	"github.com/apple/foundationdb/bindings/go/src/fdb"`)
 	g.P(`	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"`)
 	g.P(`	"github.com/apple/foundationdb/bindings/go/src/fdb/tuple"`)
-	g.P(`	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"`)
+	g.P(`	fdblayer "github.com/romannikov/fdb-record-layer/runtimes/go"`)
 	g.P(`	"google.golang.org/protobuf/proto"`)
 	g.P(")")
 	g.P()

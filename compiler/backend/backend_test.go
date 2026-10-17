@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/romannikov/fdb-layer/compiler/ir"
+	"github.com/romannikov/fdb-record-layer/compiler/ir"
 )
 
 type stubBackend struct {

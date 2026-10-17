@@ -1,4 +1,4 @@
-module github.com/romannikov/fdb-layer
+module github.com/romannikov/fdb-record-layer
 
 go 1.25.0
 

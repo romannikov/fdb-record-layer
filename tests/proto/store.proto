@@ -2,9 +2,9 @@ syntax = "proto3";
 
 package tests.store;
 
-option go_package = "github.com/romannikov/fdb-layer/tests/go/store;store";
+option go_package = "github.com/romannikov/fdb-record-layer/tests/go/store;store";
 
-import "fdb-layer/annotations.proto";
+import "fdb-record-layer/annotations.proto";
 
 message User {
     option (annotations.type_id) = 1;

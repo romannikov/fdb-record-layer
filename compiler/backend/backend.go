@@ -9,7 +9,7 @@ import (
 
 	"google.golang.org/protobuf/compiler/protogen"
 
-	"github.com/romannikov/fdb-layer/compiler/ir"
+	"github.com/romannikov/fdb-record-layer/compiler/ir"
 )
 
 // Printer is the minimal line-oriented code emission interface shared by
