@@ -31,7 +31,7 @@ jobs:
         go build -o protoc-gen-fdb-go ./compiler/cmd/protoc-gen-fdb-go
         protoc -I proto -I tests/proto \
           --plugin=protoc-gen-fdb-go=./protoc-gen-fdb-go \
-          --fdb-go_out=. --fdb-go_opt=module=github.com/romannikov/fdb-layer \
+          --fdb-go_out=. --fdb-go_opt=module=github.com/romannikov/fdb-record-layer \
           tests/proto/store.proto
         rm -f protoc-gen-fdb-go
         git diff --exit-code tests/go/

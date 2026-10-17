@@ -9,7 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
-	annotationspb "github.com/romannikov/fdb-layer/proto/fdb-layer"
+	annotationspb "github.com/romannikov/fdb-record-layer/proto/fdb-record-layer"
 )
 
 // FieldKind represents a language-neutral Protobuf scalar, enum, or message kind.

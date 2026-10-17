@@ -20,7 +20,7 @@ A `protoc` compiler and runtime library that generates FoundationDB data access 
 ### Install the `protoc` Plugin
 
 ```bash
-go install github.com/romannikov/fdb-layer/compiler/cmd/protoc-gen-fdb-go@latest
+go install github.com/romannikov/fdb-record-layer/compiler/cmd/protoc-gen-fdb-go@latest
 ```
 
 Ensure that your `GOPATH/bin` is in your `PATH` so that `protoc` can find the plugin:
@@ -104,7 +104,7 @@ This example shows CRUD operations (`Insert`, `Upsert`, `ReadRow`, `ReadRows`, `
 ```protobuf
 syntax = "proto3";
 
-import "fdb-layer/annotations.proto";
+import "fdb-record-layer/annotations.proto";
 
 message User {
   option (annotations.type_id) = 1;
@@ -133,7 +133,7 @@ import (
 
 	"github.com/apple/foundationdb/bindings/go/src/fdb"
 	"github.com/apple/foundationdb/bindings/go/src/fdb/directory"
-	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
+	fdblayer "github.com/romannikov/fdb-record-layer/runtimes/go"
 	"your/package/generated"
 )
 
@@ -203,7 +203,7 @@ func main() {
 ```protobuf
 syntax = "proto3";
 
-import "fdb-layer/annotations.proto";
+import "fdb-record-layer/annotations.proto";
 
 message Post {
   option (annotations.type_id) = 2;

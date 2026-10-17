@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package annotations;
 
-option go_package = "github.com/romannikov/fdb-layer/proto/fdb-layer;fdblayer";
+option go_package = "github.com/romannikov/fdb-record-layer/proto/fdb-record-layer;fdbrecordlayer";
 
 import "google/protobuf/descriptor.proto";
 

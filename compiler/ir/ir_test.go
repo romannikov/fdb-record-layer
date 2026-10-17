@@ -11,8 +11,8 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/pluginpb"
 
-	annotationspb "github.com/romannikov/fdb-layer/proto/fdb-layer"
-	"github.com/romannikov/fdb-layer/tests/go/store"
+	annotationspb "github.com/romannikov/fdb-record-layer/proto/fdb-record-layer"
+	"github.com/romannikov/fdb-record-layer/tests/go/store"
 )
 
 func TestProcessMessage_SkipsUnannotatedHelperMessage(t *testing.T) {
@@ -709,7 +709,7 @@ func TestParsePlugin_StoreProtoDescriptor(t *testing.T) {
 		FileToGenerate: []string{store.File_store_proto.Path()},
 		ProtoFile: []*descriptorpb.FileDescriptorProto{
 			protodesc.ToFileDescriptorProto(descriptorpb.File_google_protobuf_descriptor_proto),
-			protodesc.ToFileDescriptorProto(annotationspb.File_fdb_layer_annotations_proto),
+			protodesc.ToFileDescriptorProto(annotationspb.File_fdb_record_layer_annotations_proto),
 			protodesc.ToFileDescriptorProto(store.File_store_proto),
 		},
 	}

@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	fdblayer "github.com/romannikov/fdb-layer/runtimes/go"
-	tests "github.com/romannikov/fdb-layer/tests/go"
-	"github.com/romannikov/fdb-layer/tests/go/store"
+	fdblayer "github.com/romannikov/fdb-record-layer/runtimes/go"
+	tests "github.com/romannikov/fdb-record-layer/tests/go"
+	"github.com/romannikov/fdb-record-layer/tests/go/store"
 )
 
 func TestContextCancellation(t *testing.T) {

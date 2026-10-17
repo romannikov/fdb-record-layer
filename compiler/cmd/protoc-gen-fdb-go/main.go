@@ -3,8 +3,8 @@ package main
 import (
 	"google.golang.org/protobuf/compiler/protogen"
 
-	"github.com/romannikov/fdb-layer/compiler/backend"
-	"github.com/romannikov/fdb-layer/compiler/backend/golang"
+	"github.com/romannikov/fdb-record-layer/compiler/backend"
+	"github.com/romannikov/fdb-record-layer/compiler/backend/golang"
 )
 
 func main() {

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/romannikov/fdb-layer/compiler/backend"
-	"github.com/romannikov/fdb-layer/compiler/ir"
+	"github.com/romannikov/fdb-record-layer/compiler/backend"
+	"github.com/romannikov/fdb-record-layer/compiler/ir"
 )
 
 type bufferPrinter struct {
