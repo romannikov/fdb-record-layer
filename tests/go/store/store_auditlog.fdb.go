@@ -49,8 +49,8 @@ func (r *auditlogRepository) Insert(ctx context.Context, tr fdblayer.Transaction
 	return r.writeInserted(tr, entity, writeCfg)
 }
 
-// InsertBatch creates multiple AuditLog entities in the database, pipelining existence checks into a single round-trip.
-func (r *auditlogRepository) InsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*AuditLog, opts ...fdblayer.WriteOption) error {
+// InsertRows creates multiple AuditLog entities in the database, pipelining existence checks into a single round-trip.
+func (r *auditlogRepository) InsertRows(ctx context.Context, tr fdblayer.Transaction, entities []*AuditLog, opts ...fdblayer.WriteOption) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -164,8 +164,8 @@ func (r *auditlogRepository) Upsert(ctx context.Context, tr fdblayer.Transaction
 	return r.applyUpsert(tr, key, entity, old)
 }
 
-// UpsertBatch inserts or updates multiple AuditLog entities in the database, pipelining existing-record reads into a single round-trip.
-func (r *auditlogRepository) UpsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*AuditLog, opts ...fdblayer.WriteOption) error {
+// UpsertRows inserts or updates multiple AuditLog entities in the database, pipelining existing-record reads into a single round-trip.
+func (r *auditlogRepository) UpsertRows(ctx context.Context, tr fdblayer.Transaction, entities []*AuditLog, opts ...fdblayer.WriteOption) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -343,8 +343,8 @@ func (r *auditlogRepository) Delete(ctx context.Context, tr fdblayer.Transaction
 	return nil
 }
 
-// DeleteBatch removes multiple AuditLog entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.
-func (r *auditlogRepository) DeleteBatch(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {
+// DeleteRows removes multiple AuditLog entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.
+func (r *auditlogRepository) DeleteRows(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

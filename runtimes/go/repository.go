@@ -149,11 +149,11 @@ type Transaction interface {
 // Repository is the uniform data access interface implemented by all generated entity repositories.
 type Repository[T any] interface {
 	Insert(ctx context.Context, tr Transaction, entity T, opts ...WriteOption) error
-	InsertBatch(ctx context.Context, tr Transaction, entities []T, opts ...WriteOption) error
+	InsertRows(ctx context.Context, tr Transaction, entities []T, opts ...WriteOption) error
 	Upsert(ctx context.Context, tr Transaction, entity T, opts ...WriteOption) error
-	UpsertBatch(ctx context.Context, tr Transaction, entities []T, opts ...WriteOption) error
+	UpsertRows(ctx context.Context, tr Transaction, entities []T, opts ...WriteOption) error
 	Delete(ctx context.Context, tr Transaction, key Key) error
-	DeleteBatch(ctx context.Context, tr Transaction, keys []Key) error
+	DeleteRows(ctx context.Context, tr Transaction, keys []Key) error
 	Mutate(ctx context.Context, tr Transaction, index IndexID, key Key, val int64) error
 
 	ReadRow(ctx context.Context, tr Transaction, key Key) (T, error)

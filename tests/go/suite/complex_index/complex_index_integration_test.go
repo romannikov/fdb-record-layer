@@ -1231,9 +1231,9 @@ func TestIntegration_BatchWrites_QueueAndAuditLog(t *testing.T) {
 		t.Fatalf("unexpected DequeueBatch after EnqueueBatch: %+v", popped)
 	}
 
-	// 2. InsertBatch and UpsertBatch on versionstamped AuditLog
+	// 2. InsertRows and UpsertRows on versionstamped AuditLog
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return auditRepo.InsertBatch(ctx, tr, []*store.AuditLog{
+		return auditRepo.InsertRows(ctx, tr, []*store.AuditLog{
 			{Actor: "alice", Views: 10, Tags: []string{"t1", "t2"}},
 			{Actor: "bob", Views: 20, Tags: []string{"t2"}},
 		})
@@ -1246,13 +1246,13 @@ func TestIntegration_BatchWrites_QueueAndAuditLog(t *testing.T) {
 		return err
 	})
 	if len(listed.Items) != 2 {
-		t.Fatalf("expected 2 AuditLogs after InsertBatch, got %+v", listed)
+		t.Fatalf("expected 2 AuditLogs after InsertRows, got %+v", listed)
 	}
 	aliceID := listed.Items[0].LogId
 	bobID := listed.Items[1].LogId
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
-		return auditRepo.UpsertBatch(ctx, tr, []*store.AuditLog{
+		return auditRepo.UpsertRows(ctx, tr, []*store.AuditLog{
 			{LogId: aliceID, Actor: "alice", Views: 15, Tags: []string{"t2", "t3"}},
 			{LogId: aliceID, Actor: "alice_v2", Views: 30, Tags: []string{"t3"}},
 			{Actor: "carol", Views: 40, Tags: []string{"t1"}},
@@ -1268,13 +1268,13 @@ func TestIntegration_BatchWrites_QueueAndAuditLog(t *testing.T) {
 		if err != nil || len(byAliceV2.Items) != 1 || byAliceV2.Items[0].Views != 30 {
 			t.Fatalf("expected 1 log for 'alice_v2' with Views=30, got %+v, err=%v", byAliceV2, err)
 		}
-		return auditRepo.DeleteBatch(ctx, tr, []fdblayer.Key{{aliceID}, {bobID}, {aliceID}})
+		return auditRepo.DeleteRows(ctx, tr, []fdblayer.Key{{aliceID}, {bobID}, {aliceID}})
 	})
 
 	tests.WithTx(t, db, func(tr fdb.Transaction) error {
 		remaining, err := auditRepo.Scan(ctx, tr, fdblayer.AllKeys())
 		if err != nil || len(remaining.Items) != 1 || remaining.Items[0].Actor != "carol" {
-			t.Fatalf("expected only carol remaining after DeleteBatch, got %+v, err=%v", remaining, err)
+			t.Fatalf("expected only carol remaining after DeleteRows, got %+v, err=%v", remaining, err)
 		}
 		return nil
 	})

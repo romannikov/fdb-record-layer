@@ -1219,47 +1219,47 @@ func TestEnqueueBatch_TaskMessage(t *testing.T) {
 	}
 }
 
-func TestInsertBatchAndUpsertBatch_AuditLog_Versionstamps(t *testing.T) {
+func TestInsertRowsAndUpsertRows_AuditLog_Versionstamps(t *testing.T) {
 	ctx := context.Background()
 	tr, dir, _ := tests.Setup()
 	auditRepo := store.NewAuditLogRepository(dir)
 
-	// 1. Overflow check in InsertBatch.
-	err := auditRepo.InsertBatch(ctx, tr, []*store.AuditLog{
+	// 1. Overflow check in InsertRows.
+	err := auditRepo.InsertRows(ctx, tr, []*store.AuditLog{
 		{Actor: "alice", Views: 1},
 		{Actor: "bob", Views: 2},
 	}, fdblayer.WithUserVersion(0xFFFF))
 	if !errors.Is(err, fdblayer.ErrInvalidKey) {
-		t.Fatalf("expected ErrInvalidKey on UserVersion overflow in InsertBatch, got %v", err)
+		t.Fatalf("expected ErrInvalidKey on UserVersion overflow in InsertRows, got %v", err)
 	}
 
-	// 2. InsertBatch with 2 logs assigns sequential UserVersions.
-	if err := auditRepo.InsertBatch(ctx, tr, []*store.AuditLog{
+	// 2. InsertRows with 2 logs assigns sequential UserVersions.
+	if err := auditRepo.InsertRows(ctx, tr, []*store.AuditLog{
 		{Actor: "alice", Views: 10, Tags: []string{"t1", "t2"}},
 		{Actor: "bob", Views: 20, Tags: []string{"t2"}},
 	}, fdblayer.WithUserVersion(5)); err != nil {
-		t.Fatalf("InsertBatch(AuditLog) failed: %v", err)
+		t.Fatalf("InsertRows(AuditLog) failed: %v", err)
 	}
 
 	allLogs, err := auditRepo.Scan(ctx, tr, fdblayer.AllKeys())
 	if err != nil || len(allLogs.Items) != 2 {
-		t.Fatalf("expected 2 AuditLogs after InsertBatch, got %+v, err=%v", allLogs, err)
+		t.Fatalf("expected 2 AuditLogs after InsertRows, got %+v, err=%v", allLogs, err)
 	}
 	aliceID := allLogs.Items[0].LogId
 	if len(aliceID) != 12 {
 		t.Fatalf("expected 12-byte hydrated LogId, got %d bytes", len(aliceID))
 	}
 
-	// 3. UpsertBatch mixing:
+	// 3. UpsertRows mixing:
 	//    - An update to existing aliceID (Actor: "alice", Tags: ["t2", "t3"])
 	//    - A second update to the SAME aliceID in the same batch (Actor: "alice_v2", Tags: ["t3"])
 	//    - A new log with 0-byte LogId (Actor: "carol", Tags: ["t1"])
-	if err := auditRepo.UpsertBatch(ctx, tr, []*store.AuditLog{
+	if err := auditRepo.UpsertRows(ctx, tr, []*store.AuditLog{
 		{LogId: aliceID, Actor: "alice", Views: 15, Tags: []string{"t2", "t3"}},
 		{LogId: aliceID, Actor: "alice_v2", Views: 30, Tags: []string{"t3"}},
 		{Actor: "carol", Views: 40, Tags: []string{"t1"}},
 	}); err != nil {
-		t.Fatalf("UpsertBatch(AuditLog) failed: %v", err)
+		t.Fatalf("UpsertRows(AuditLog) failed: %v", err)
 	}
 
 	// Verify old Actor="alice" index was cleared and "alice_v2" is indexed.
@@ -1280,13 +1280,13 @@ func TestInsertBatchAndUpsertBatch_AuditLog_Versionstamps(t *testing.T) {
 		t.Fatalf("expected only alice_v2 in tag 't3', got %+v, err=%v", res, err)
 	}
 
-	// 4. DeleteBatch removes alice_v2 and bob (including duplicate key in batch).
+	// 4. DeleteRows removes alice_v2 and bob (including duplicate key in batch).
 	bobID := allLogs.Items[1].LogId
-	if err := auditRepo.DeleteBatch(ctx, tr, []fdblayer.Key{{aliceID}, {bobID}, {aliceID}}); err != nil {
-		t.Fatalf("DeleteBatch(AuditLog) failed: %v", err)
+	if err := auditRepo.DeleteRows(ctx, tr, []fdblayer.Key{{aliceID}, {bobID}, {aliceID}}); err != nil {
+		t.Fatalf("DeleteRows(AuditLog) failed: %v", err)
 	}
 	remaining, err := auditRepo.Scan(ctx, tr, fdblayer.AllKeys())
 	if err != nil || len(remaining.Items) != 1 || remaining.Items[0].Actor != "carol" {
-		t.Fatalf("expected only carol remaining after DeleteBatch, got %+v, err=%v", remaining, err)
+		t.Fatalf("expected only carol remaining after DeleteRows, got %+v, err=%v", remaining, err)
 	}
 }

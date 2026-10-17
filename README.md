@@ -6,9 +6,9 @@ A `protoc` compiler and runtime library that generates FoundationDB data access 
 
 ## Supported Features
 
-- **Type-Safe CRUD & Pipelined Batch Operations**: Insert, upsert, delete, and fetch Protobuf records by single-field or composite primary keys, including pipelined batch reads (`ReadRows`) and batch writes (`InsertBatch`, `UpsertBatch`, `DeleteBatch`) that issue all `tr.Get` futures concurrently in a single network round-trip.
+- **Type-Safe CRUD & Pipelined Batch Operations**: Insert, upsert, delete, and fetch Protobuf records by single-field or composite primary keys, including pipelined batch reads (`ReadRows`) and batch writes (`InsertRows`, `UpsertRows`, `DeleteRows`) that issue all `tr.Get` futures concurrently in a single network round-trip.
 - **Range Scans & Cursor Pagination**: Query primary keys or secondary indexes by exact match, leading tuple prefix, or bounded `[begin, end)` range with configurable page limits, reverse iteration, and resume cursors.
-- **Secondary & Fan-Out Indexes**: Index scalar, composite, or `repeated` (fan-out) fields directly from Protobuf annotations. The generated repository automatically maintains index entries on `Insert`, `InsertBatch`, `Upsert`, `UpsertBatch` (updating only changed index deltas), `Delete`, and `DeleteBatch`.
+- **Secondary & Fan-Out Indexes**: Index scalar, composite, or `repeated` (fan-out) fields directly from Protobuf annotations. The generated repository automatically maintains index entries on `Insert`, `InsertRows`, `Upsert`, `UpsertRows` (updating only changed index deltas), `Delete`, and `DeleteRows`.
 - **Automatic Aggregate Indexes (`COUNT`, `SUM`, `MIN`, `MAX`)**: Maintain conflict-free group-by rollups (or global table-wide totals) automatically whenever records are inserted, upserted, or deleted, and read the aggregated value in $O(1)$ via `ReadAggregate`.
 - **Manual Atomic Mutation Indexes (`COUNT`, `ADD`, `MIN`, `MAX`)**: Update high-contention counters and watermarks (such as view counts, likes, or peak latency) in 0 RTTs via `Mutate` without reading or rewriting the underlying Protobuf record.
 - **Versionstamped Keys & FIFO Queues**: Order records by commit time or turn a message into a transactional FIFO queue (`Enqueue`, `EnqueueBatch`, `Dequeue`, `DequeueBatch`) powered by FoundationDB 12-byte versionstamps.
@@ -179,7 +179,7 @@ func main() {
 		}
 
 		// Pipelined batch upsert (issues all existing-record reads concurrently in 1 network round-trip)
-		return nil, userRepo.UpsertBatch(ctx, tr, []*generated.User{
+		return nil, userRepo.UpsertRows(ctx, tr, []*generated.User{
 			{Id: "u123", Email: "john.doe@example.com", Name: "John Doe"},
 			{Id: "u124", Email: "jane@example.com", Name: "Jane Doe"},
 		})

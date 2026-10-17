@@ -67,8 +67,8 @@ func (r *orderRepository) Insert(ctx context.Context, tr fdblayer.Transaction, e
 	return r.writeInserted(tr, key, entity)
 }
 
-// InsertBatch creates multiple Order entities in the database, pipelining existence checks into a single round-trip.
-func (r *orderRepository) InsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Order, opts ...fdblayer.WriteOption) error {
+// InsertRows creates multiple Order entities in the database, pipelining existence checks into a single round-trip.
+func (r *orderRepository) InsertRows(ctx context.Context, tr fdblayer.Transaction, entities []*Order, opts ...fdblayer.WriteOption) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -236,8 +236,8 @@ func (r *orderRepository) Upsert(ctx context.Context, tr fdblayer.Transaction, e
 	return r.applyUpsert(tr, key, entity, old)
 }
 
-// UpsertBatch inserts or updates multiple Order entities in the database, pipelining existing-record reads into a single round-trip.
-func (r *orderRepository) UpsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Order, opts ...fdblayer.WriteOption) error {
+// UpsertRows inserts or updates multiple Order entities in the database, pipelining existing-record reads into a single round-trip.
+func (r *orderRepository) UpsertRows(ctx context.Context, tr fdblayer.Transaction, entities []*Order, opts ...fdblayer.WriteOption) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -580,8 +580,8 @@ func (r *orderRepository) Delete(ctx context.Context, tr fdblayer.Transaction, k
 	return nil
 }
 
-// DeleteBatch removes multiple Order entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.
-func (r *orderRepository) DeleteBatch(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {
+// DeleteRows removes multiple Order entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.
+func (r *orderRepository) DeleteRows(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

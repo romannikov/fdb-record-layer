@@ -56,8 +56,8 @@ func (r *productRepository) Insert(ctx context.Context, tr fdblayer.Transaction,
 	return r.writeInserted(tr, key, entity)
 }
 
-// InsertBatch creates multiple Product entities in the database, pipelining existence checks into a single round-trip.
-func (r *productRepository) InsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Product, opts ...fdblayer.WriteOption) error {
+// InsertRows creates multiple Product entities in the database, pipelining existence checks into a single round-trip.
+func (r *productRepository) InsertRows(ctx context.Context, tr fdblayer.Transaction, entities []*Product, opts ...fdblayer.WriteOption) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -160,8 +160,8 @@ func (r *productRepository) Upsert(ctx context.Context, tr fdblayer.Transaction,
 	return r.applyUpsert(tr, key, entity, old)
 }
 
-// UpsertBatch inserts or updates multiple Product entities in the database, pipelining existing-record reads into a single round-trip.
-func (r *productRepository) UpsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*Product, opts ...fdblayer.WriteOption) error {
+// UpsertRows inserts or updates multiple Product entities in the database, pipelining existing-record reads into a single round-trip.
+func (r *productRepository) UpsertRows(ctx context.Context, tr fdblayer.Transaction, entities []*Product, opts ...fdblayer.WriteOption) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -303,8 +303,8 @@ func (r *productRepository) Delete(ctx context.Context, tr fdblayer.Transaction,
 	return nil
 }
 
-// DeleteBatch removes multiple Product entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.
-func (r *productRepository) DeleteBatch(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {
+// DeleteRows removes multiple Product entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.
+func (r *productRepository) DeleteRows(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}

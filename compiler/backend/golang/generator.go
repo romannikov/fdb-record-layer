@@ -424,17 +424,17 @@ func generateInsert(g Printer, msg ir.MessageSpec) {
 	g.P("}")
 	g.P()
 
-	generateInsertBatch(g, msg)
+	generateInsertRows(g, msg)
 	generateWriteInserted(g, msg)
 }
 
-func generateInsertBatch(g Printer, msg ir.MessageSpec) {
+func generateInsertRows(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	hasVS := ir.MsgHasVersionstampPK(msg)
 	typeIDConst := typeIDConstName(msg)
 
-	g.P("// InsertBatch creates multiple ", msg.Name, " entities in the database, pipelining existence checks into a single round-trip.")
-	g.P("func (r *", lowerName, "Repository) InsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*", msg.Name, ", opts ...fdblayer.WriteOption) error {")
+	g.P("// InsertRows creates multiple ", msg.Name, " entities in the database, pipelining existence checks into a single round-trip.")
+	g.P("func (r *", lowerName, "Repository) InsertRows(ctx context.Context, tr fdblayer.Transaction, entities []*", msg.Name, ", opts ...fdblayer.WriteOption) error {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return err")
 	g.P("	}")
@@ -639,11 +639,11 @@ func generateUpsert(g Printer, msg ir.MessageSpec) {
 	g.P("}")
 	g.P()
 
-	generateUpsertBatch(g, msg)
+	generateUpsertRows(g, msg)
 	generateApplyUpsert(g, msg)
 }
 
-func generateUpsertBatch(g Printer, msg ir.MessageSpec) {
+func generateUpsertRows(g Printer, msg ir.MessageSpec) {
 	lowerName := strings.ToLower(msg.Name)
 	hasVS := ir.MsgHasVersionstampPK(msg)
 	hasIdx := msgHasNonMutationIndex(msg)
@@ -651,8 +651,8 @@ func generateUpsertBatch(g Printer, msg ir.MessageSpec) {
 	typeIDConst := typeIDConstName(msg)
 	vsFieldName := versionstampFieldName(msg)
 
-	g.P("// UpsertBatch inserts or updates multiple ", msg.Name, " entities in the database, pipelining existing-record reads into a single round-trip.")
-	g.P("func (r *", lowerName, "Repository) UpsertBatch(ctx context.Context, tr fdblayer.Transaction, entities []*", msg.Name, ", opts ...fdblayer.WriteOption) error {")
+	g.P("// UpsertRows inserts or updates multiple ", msg.Name, " entities in the database, pipelining existing-record reads into a single round-trip.")
+	g.P("func (r *", lowerName, "Repository) UpsertRows(ctx context.Context, tr fdblayer.Transaction, entities []*", msg.Name, ", opts ...fdblayer.WriteOption) error {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return err")
 	g.P("	}")
@@ -993,13 +993,13 @@ func generateDelete(g Printer, msg ir.MessageSpec) {
 	g.P("}")
 	g.P()
 
-	generateDeleteBatch(g, msg, hasDeleteIdx, needsPKTuple)
+	generateDeleteRows(g, msg, hasDeleteIdx, needsPKTuple)
 	if hasDeleteIdx || needsPKTuple {
 		generateApplyDelete(g, msg, hasDeleteIdx, needsPKTuple)
 	}
 }
 
-func generateDeleteBatch(g Printer, msg ir.MessageSpec, hasDeleteIdx, needsPKTuple bool) {
+func generateDeleteRows(g Printer, msg ir.MessageSpec, hasDeleteIdx, needsPKTuple bool) {
 	lowerName := strings.ToLower(msg.Name)
 	typeIDConst := typeIDConstName(msg)
 	pkSchema := schemaSliceExpr(msg.PrimaryKeyFields)
@@ -1008,8 +1008,8 @@ func generateDeleteBatch(g Printer, msg ir.MessageSpec, hasDeleteIdx, needsPKTup
 		pkTupleVar = "pkTuple"
 	}
 
-	g.P("// DeleteBatch removes multiple ", msg.Name, " entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.")
-	g.P("func (r *", lowerName, "Repository) DeleteBatch(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {")
+	g.P("// DeleteRows removes multiple ", msg.Name, " entities from the database by their primary keys, pipelining index cleanup reads into a single round-trip.")
+	g.P("func (r *", lowerName, "Repository) DeleteRows(ctx context.Context, tr fdblayer.Transaction, keys []fdblayer.Key) error {")
 	g.P("	if err := ctx.Err(); err != nil {")
 	g.P("		return err")
 	g.P("	}")
